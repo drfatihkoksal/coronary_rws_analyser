@@ -1,0 +1,48 @@
+# FastAPI and async support
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+websockets>=12.0
+
+# Deep Learning
+# Install PyTorch with CUDA support separately:
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+torch>=2.0.0
+torchvision>=0.15.0
+
+# nnU-Net v2 for custom segmentation model
+nnunetv2>=2.2
+
+# Computer Vision
+opencv-contrib-python>=4.10.0  # Includes CSRT tracker
+scikit-image>=0.22.0
+scipy>=1.12.0
+
+# DICOM Processing
+pydicom>=2.4.0
+SimpleITK>=2.3.0
+pylibjpeg>=2.0
+pylibjpeg-libjpeg>=2.0
+nibabel>=5.2.0  # NIfTI export
+
+# Data Processing
+numpy>=1.26.0
+pandas>=2.2.0
+pillow>=10.0.0
+
+# PDF Generation
+reportlab>=4.1.0
+matplotlib>=3.8.0
+
+# Serialization
+pydantic>=2.6.0
+
+# Utilities
+python-dotenv>=1.0.0
+loguru>=0.7.0
+tqdm>=4.66.0
+
+# Testing
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+httpx>=0.27.0  # For testing FastAPI
