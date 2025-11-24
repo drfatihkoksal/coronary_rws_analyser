@@ -101,5 +101,6 @@ Thumbs.db
 # Jupyter
 .ipynb_checkpoints/
 
-# Academic - keep literature notes but ignore large PDFs
-akademik/literature/**/*.pdf
+# Project documentation (private)
+.context/
+akademik/
