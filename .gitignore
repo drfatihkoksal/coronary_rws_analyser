@@ -103,4 +103,5 @@ Thumbs.db
 
 # Project documentation (private)
 .context/
+.claude/
 akademik/
