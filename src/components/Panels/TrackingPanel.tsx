@@ -2,6 +2,7 @@
  * Tracking Panel Component
  *
  * CSRT-based ROI tracking controls with WebSocket real-time updates.
+ * Supports fixed 150x150 ROI and adaptive ROI modes.
  */
 
 import { useState, useCallback, useEffect, useRef } from 'react';
@@ -25,6 +26,8 @@ export function TrackingPanel() {
   const propagationProgress = useTrackingStore((s) => s.propagationProgress);
   const setIsPropagating = useTrackingStore((s) => s.setIsPropagating);
   const setPropagationProgress = useTrackingStore((s) => s.setPropagationProgress);
+  const roiMode = useTrackingStore((s) => s.roiMode);
+  const setRoiMode = useTrackingStore((s) => s.setRoiMode);
 
   const [direction, setDirection] = useState<TrackingDirection>('forward');
   const [endFrame, setEndFrame] = useState(totalFrames > 0 ? totalFrames - 1 : 0);
@@ -62,16 +65,22 @@ export function TrackingPanel() {
       const response = await api.tracking.initialize({
         frameIndex: currentFrame,
         roi: currentRoi,
+        roiMode: roiMode,
       });
 
       if (response.status === 'initialized') {
         setIsInitialized(true);
         setTrackingResults(null);
+
+        // Update annotation store with actual ROI (may be adjusted by roi_mode)
+        if (response.roi) {
+          setROI(currentFrame, response.roi);
+        }
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to initialize tracker');
     }
-  }, [currentFrame, currentRoi]);
+  }, [currentFrame, currentRoi, roiMode, setROI]);
 
   // Start propagation with WebSocket
   const handlePropagate = useCallback(async () => {
@@ -193,12 +202,52 @@ export function TrackingPanel() {
         ROI Tracking (CSRT)
       </h3>
 
+      {/* ROI Mode Selection */}
+      <div className="space-y-2">
+        <label className="text-xs text-gray-400 block">ROI Mode</label>
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            onClick={() => setRoiMode('fixed_150x150')}
+            disabled={isInitialized || isPropagating}
+            className={`py-2 px-3 rounded text-xs transition-colors ${
+              roiMode === 'fixed_150x150'
+                ? 'bg-blue-600 text-white'
+                : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+            } ${(isInitialized || isPropagating) ? 'opacity-50 cursor-not-allowed' : ''}`}
+          >
+            Fixed 150x150
+          </button>
+          <button
+            onClick={() => setRoiMode('adaptive')}
+            disabled={isInitialized || isPropagating}
+            className={`py-2 px-3 rounded text-xs transition-colors ${
+              roiMode === 'adaptive'
+                ? 'bg-blue-600 text-white'
+                : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+            } ${(isInitialized || isPropagating) ? 'opacity-50 cursor-not-allowed' : ''}`}
+          >
+            Adaptive
+          </button>
+        </div>
+        <p className="text-xs text-gray-500">
+          {roiMode === 'fixed_150x150'
+            ? 'ROI size stays constant at 150x150 pixels'
+            : 'ROI size adapts based on tracker output'}
+        </p>
+      </div>
+
       {/* Status */}
       <div className="bg-gray-800 rounded p-3 space-y-2 text-xs">
         <div className="flex justify-between">
           <span className="text-gray-400">ROI:</span>
           <span className={currentRoi ? 'text-green-400' : 'text-gray-500'}>
             {currentRoi ? `${currentRoi.width}x${currentRoi.height}` : 'Not defined (press B)'}
+          </span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-gray-400">Mode:</span>
+          <span className="text-blue-400">
+            {roiMode === 'fixed_150x150' ? 'Fixed 150x150' : 'Adaptive'}
           </span>
         </div>
         <div className="flex justify-between">

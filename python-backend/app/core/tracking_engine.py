@@ -1,16 +1,19 @@
 """
-Vessel Tracking Engine (CSRT-only)
+Vessel Tracking Engine
 
-ROI tracking for coronary vessel propagation across frames using CSRT tracker.
+ROI tracking for coronary vessel propagation across frames.
+Uses best available OpenCV tracker (TrackerVit, TrackerNano, or CSRT).
 
 References:
 - CSRT: Lukezic et al., CVPR 2017
+- ViT Tracker: OpenCV DNN-based Visual Transformer tracker
 """
 
-import logging
+import os
 from typing import Tuple, Optional, List, Dict, Any
 from dataclasses import dataclass, field
 import numpy as np
+from loguru import logger
 
 try:
     import cv2
@@ -19,41 +22,83 @@ except ImportError:
     CV2_AVAILABLE = False
     raise ImportError("OpenCV is required for tracking")
 
-logger = logging.getLogger(__name__)
+
+# Model paths for DNN-based trackers
+_MODEL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "models", "trackers")
+_VIT_MODEL = os.path.join(_MODEL_DIR, "vitTracker.onnx")
+_NANO_BACKBONE = os.path.join(_MODEL_DIR, "nanotrack_backbone.onnx")
+_NANO_HEAD = os.path.join(_MODEL_DIR, "nanotrack_head.onnx")
 
 
-def create_csrt_tracker():
+def create_tracker():
     """
-    Create CSRT tracker compatible with different OpenCV versions.
+    Create object tracker compatible with different OpenCV versions.
 
-    OpenCV < 4.5.1: cv2.TrackerCSRT_create()
-    OpenCV >= 4.5.1: cv2.legacy.TrackerCSRT_create()
-    OpenCV >= 4.8.0: cv2.legacy.TrackerCSRT.create()
+    Priority:
+    1. TrackerMIL (most reliable for medical images)
+    2. TrackerVit (optional, less reliable for low-contrast images)
     """
-    # Try new API (OpenCV >= 4.5.1)
+    # Use TrackerMIL (most reliable for medical images)
+    try:
+        if hasattr(cv2, 'TrackerMIL') and hasattr(cv2.TrackerMIL, 'create'):
+            tracker = cv2.TrackerMIL.create()
+            logger.info("Using TrackerMIL")
+            return tracker, "mil"
+    except Exception as e:
+        logger.debug(f"TrackerMIL creation failed: {e}")
+
+    # Try TrackerNano (lightweight, requires OpenCV >= 4.7)
+    if hasattr(cv2, 'TrackerNano') and hasattr(cv2.TrackerNano, 'create'):
+        if os.path.exists(_NANO_BACKBONE) and os.path.exists(_NANO_HEAD):
+            try:
+                params = cv2.TrackerNano_Params()
+                params.backbone = _NANO_BACKBONE
+                params.neckhead = _NANO_HEAD
+                tracker = cv2.TrackerNano.create(params)
+                logger.info(f"Using TrackerNano")
+                return tracker, "nano"
+            except Exception as e:
+                logger.debug(f"TrackerNano creation failed: {e}")
+        else:
+            logger.debug(f"TrackerNano models not found")
+
+    # Try CSRT (legacy, OpenCV < 4.12)
     try:
         if hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerCSRT_create'):
-            return cv2.legacy.TrackerCSRT_create()
+            tracker = cv2.legacy.TrackerCSRT_create()
+            logger.info("Using TrackerCSRT (legacy)")
+            return tracker, "csrt"
     except Exception:
         pass
 
-    # Try newer API (OpenCV >= 4.8.0)
     try:
         if hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerCSRT'):
-            return cv2.legacy.TrackerCSRT.create()
+            tracker = cv2.legacy.TrackerCSRT.create()
+            logger.info("Using TrackerCSRT (legacy)")
+            return tracker, "csrt"
     except Exception:
         pass
 
-    # Try old API (OpenCV < 4.5.1)
     try:
         if hasattr(cv2, 'TrackerCSRT_create'):
-            return cv2.TrackerCSRT_create()
+            tracker = cv2.TrackerCSRT_create()
+            logger.info("Using TrackerCSRT")
+            return tracker, "csrt"
+    except Exception:
+        pass
+
+    # Fallback to TrackerMIL (always available)
+    try:
+        if hasattr(cv2, 'TrackerMIL') and hasattr(cv2.TrackerMIL, 'create'):
+            tracker = cv2.TrackerMIL.create()
+            logger.info("Using TrackerMIL (fallback)")
+            return tracker, "mil"
     except Exception:
         pass
 
     raise RuntimeError(
-        f"CSRT tracker not available in OpenCV {cv2.__version__}. "
-        "Install opencv-contrib-python: pip install opencv-contrib-python"
+        f"No compatible tracker available in OpenCV {cv2.__version__}. "
+        "Please install opencv-contrib-python >= 4.7"
     )
 
 
@@ -63,25 +108,28 @@ class TrackingResult:
     success: bool
     roi: Optional[Tuple[int, int, int, int]]  # (x, y, w, h)
     confidence: float
-    method: str = "csrt"
+    method: str = "unknown"  # "vit", "nano", "csrt", "mil"
     error_message: Optional[str] = None
 
 
 @dataclass
 class TrackingState:
     """Internal state for tracking across frames."""
-    csrt_tracker: Optional[Any] = None
+    tracker: Optional[Any] = None
+    tracker_type: str = "unknown"  # "vit", "nano", "csrt", "mil"
     previous_frame: Optional[np.ndarray] = None  # Grayscale uint8
     previous_roi: Optional[Tuple[int, int, int, int]] = None
     initial_roi: Optional[Tuple[int, int, int, int]] = None
     confidence_history: List[float] = field(default_factory=list)
+    roi_mode: str = "fixed_150x150"  # "fixed_150x150" or "adaptive"
 
 
 class TrackingEngine:
     """
-    CSRT-based tracking engine for vessel ROI propagation.
+    Tracking engine for vessel ROI propagation.
 
-    Uses OpenCV's CSRT tracker for robust ROI tracking across frames.
+    Uses best available OpenCV tracker (TrackerVit, TrackerNano, or CSRT)
+    for robust ROI tracking across frames.
 
     Usage:
         engine = TrackingEngine()
@@ -93,34 +141,36 @@ class TrackingEngine:
     """
 
     # Constants
-    CONFIDENCE_THRESHOLD = 0.6  # Minimum confidence for success
+    CONFIDENCE_THRESHOLD = 0.8  # Minimum confidence for success
     CONFIDENCE_WINDOW = 5  # Rolling window for confidence check
+    FIXED_ROI_SIZE = 150  # Fixed ROI size when using fixed_150x150 mode
 
     def __init__(
         self,
-        confidence_threshold: float = 0.6,
-        fixed_roi_size: bool = True
+        confidence_threshold: float = 0.95,
+        roi_mode: str = "fixed_150x150"
     ):
         """
         Initialize tracking engine.
 
         Args:
             confidence_threshold: Minimum confidence to continue tracking
-            fixed_roi_size: If True, keep ROI size constant (only track position)
+            roi_mode: ROI tracking mode - "fixed_150x150" (constant 150x150) or "adaptive" (CSRT-determined size)
         """
         self.confidence_threshold = confidence_threshold
-        self.fixed_roi_size = fixed_roi_size
+        self.roi_mode = roi_mode
         self._state = TrackingState()
 
     @property
     def is_initialized(self) -> bool:
         """Check if tracker is initialized."""
-        return self._state.csrt_tracker is not None
+        return self._state.tracker is not None
 
     def initialize(
         self,
         frame: np.ndarray,
-        roi: Tuple[int, int, int, int]
+        roi: Tuple[int, int, int, int],
+        roi_mode: str = None
     ) -> bool:
         """
         Initialize CSRT tracker with initial frame and ROI.
@@ -128,6 +178,7 @@ class TrackingEngine:
         Args:
             frame: Initial frame (grayscale or BGR)
             roi: ROI bounding box (x, y, w, h)
+            roi_mode: Override ROI mode for this session ("fixed_150x150" or "adaptive")
 
         Returns:
             True if initialization successful
@@ -135,12 +186,37 @@ class TrackingEngine:
         try:
             self.reset()
 
-            # Prepare frame
+            # Set ROI mode for this session
+            if roi_mode is not None:
+                self.roi_mode = roi_mode
+            self._state.roi_mode = self.roi_mode
+
+            # Prepare frame with preprocessing for better tracking
             frame_gray = self._ensure_grayscale_uint8(frame)
-            frame_bgr = cv2.cvtColor(frame_gray, cv2.COLOR_GRAY2BGR)
+            frame_bgr = self._preprocess_for_tracking(frame_gray)
+            frame_h, frame_w = frame_gray.shape[:2]
+
+            # Adjust ROI based on mode
+            x, y, w, h = roi
+            if self.roi_mode == "fixed_150x150":
+                # Use fixed 150x150 size, centered on provided ROI center
+                center_x = x + w // 2
+                center_y = y + h // 2
+                new_w = self.FIXED_ROI_SIZE
+                new_h = self.FIXED_ROI_SIZE
+                new_x = center_x - new_w // 2
+                new_y = center_y - new_h // 2
+
+                # Clamp to frame bounds
+                new_x = max(0, min(new_x, frame_w - new_w))
+                new_y = max(0, min(new_y, frame_h - new_h))
+                roi = (new_x, new_y, new_w, new_h)
+                logger.info(f"Using fixed 150x150 ROI mode, adjusted ROI: {roi}")
+            else:
+                # adaptive mode - use provided ROI as-is
+                logger.info(f"Using adaptive ROI mode, ROI: {roi}")
 
             # Validate ROI
-            frame_h, frame_w = frame_gray.shape[:2]
             x, y, w, h = roi
             if x < 0 or y < 0 or x + w > frame_w or y + h > frame_h:
                 logger.error(f"ROI out of bounds: {roi}, frame: {frame_w}x{frame_h}")
@@ -150,12 +226,25 @@ class TrackingEngine:
                 logger.error(f"Invalid ROI dimensions: {roi}")
                 return False
 
-            # Initialize CSRT tracker
-            self._state.csrt_tracker = create_csrt_tracker()
-            success = self._state.csrt_tracker.init(frame_bgr, roi)
+            # Initialize tracker
+            tracker, tracker_type = create_tracker()
+            self._state.tracker = tracker
+            self._state.tracker_type = tracker_type
 
-            if not success:
-                logger.error("CSRT tracker initialization failed")
+            logger.info(f"Init frame: shape={frame_bgr.shape}, min={frame_bgr.min()}, max={frame_bgr.max()}")
+            logger.info(f"Init ROI: {roi}")
+
+            # OpenCV 4.x trackers may return None from init() (void function)
+            # Only fail if explicitly returns False
+            init_result = self._state.tracker.init(frame_bgr, roi)
+
+            # Check tracking score after init (TrackerVit specific)
+            if hasattr(self._state.tracker, 'getTrackingScore'):
+                score = self._state.tracker.getTrackingScore()
+                logger.info(f"Init score: {score}")
+
+            if init_result is False:
+                logger.error(f"Tracker ({tracker_type}) initialization failed")
                 return False
 
             # Store state
@@ -164,7 +253,7 @@ class TrackingEngine:
             self._state.initial_roi = roi
             self._state.confidence_history = [1.0]  # Initial confidence
 
-            logger.info(f"CSRT tracking initialized: ROI={roi}")
+            logger.info(f"Tracking initialized: tracker={tracker_type}, ROI={roi}, mode={self.roi_mode}")
             return True
 
         except Exception as e:
@@ -184,31 +273,53 @@ class TrackingEngine:
         if not self.is_initialized:
             return TrackingResult(
                 success=False, roi=None,
-                confidence=0.0, method="csrt",
+                confidence=0.0, method=self._state.tracker_type,
                 error_message="Tracker not initialized"
             )
 
         try:
             frame_gray = self._ensure_grayscale_uint8(frame)
-            frame_bgr = cv2.cvtColor(frame_gray, cv2.COLOR_GRAY2BGR)
+            frame_bgr = self._preprocess_for_tracking(frame_gray)
+            frame_h, frame_w = frame_gray.shape[:2]
 
-            # CSRT tracking
-            success, bbox = self._state.csrt_tracker.update(frame_bgr)
+            logger.info(f"Track: frame shape={frame_bgr.shape}, min={frame_bgr.min()}, max={frame_bgr.max()}, tracker={self._state.tracker_type}")
+
+            # Tracker update
+            success, bbox = self._state.tracker.update(frame_bgr)
+
+            # Check tracking score (TrackerVit specific)
+            score = None
+            if hasattr(self._state.tracker, 'getTrackingScore'):
+                score = self._state.tracker.getTrackingScore()
+
+            logger.info(f"Track result: success={success}, bbox={bbox}, score={score}")
 
             if not success:
+                logger.warning(f"Tracking failed: bbox={bbox}, previous_roi={self._state.previous_roi}")
                 return TrackingResult(
                     success=False, roi=self._state.previous_roi,
-                    confidence=0.0, method="csrt",
-                    error_message="CSRT tracking failed"
+                    confidence=0.0, method=self._state.tracker_type,
+                    error_message="Tracking failed"
                 )
 
             new_x, new_y, new_w, new_h = map(int, bbox)
 
-            # Keep original size if fixed_roi_size
-            if self.fixed_roi_size and self._state.initial_roi:
-                _, _, orig_w, orig_h = self._state.initial_roi
-                roi = (new_x, new_y, orig_w, orig_h)
+            # Apply ROI mode
+            if self._state.roi_mode == "fixed_150x150":
+                # Keep fixed 150x150 size, only track center position
+                center_x = new_x + new_w // 2
+                center_y = new_y + new_h // 2
+                fixed_w = self.FIXED_ROI_SIZE
+                fixed_h = self.FIXED_ROI_SIZE
+                roi_x = center_x - fixed_w // 2
+                roi_y = center_y - fixed_h // 2
+
+                # Clamp to frame bounds
+                roi_x = max(0, min(roi_x, frame_w - fixed_w))
+                roi_y = max(0, min(roi_y, frame_h - fixed_h))
+                roi = (roi_x, roi_y, fixed_w, fixed_h)
             else:
+                # adaptive mode - use CSRT's determined size
                 roi = (new_x, new_y, new_w, new_h)
 
             # Calculate confidence based on CSRT internal metrics
@@ -224,18 +335,18 @@ class TrackingEngine:
             if len(self._state.confidence_history) > 20:
                 self._state.confidence_history = self._state.confidence_history[-20:]
 
-            logger.debug(f"CSRT tracked: ROI={roi}, confidence={confidence:.3f}")
+            logger.debug(f"Tracked: ROI={roi}, confidence={confidence:.3f}, mode={self._state.roi_mode}, tracker={self._state.tracker_type}")
 
             return TrackingResult(
                 success=True, roi=roi,
-                confidence=confidence, method="csrt"
+                confidence=confidence, method=self._state.tracker_type
             )
 
         except Exception as e:
             logger.error(f"Tracking failed: {e}")
             return TrackingResult(
                 success=False, roi=self._state.previous_roi,
-                confidence=0.0, method="csrt",
+                confidence=0.0, method=self._state.tracker_type,
                 error_message=str(e)
             )
 
@@ -334,6 +445,19 @@ class TrackingEngine:
 
         return frame
 
+    def _preprocess_for_tracking(self, frame_gray: np.ndarray) -> np.ndarray:
+        """
+        Preprocess frame for tracking.
+
+        Applies histogram equalization to improve contrast for TrackerVit.
+        Medical images often have low contrast which causes tracking failures.
+        """
+        # Apply histogram equalization for better contrast
+        frame_eq = cv2.equalizeHist(frame_gray)
+        # Convert to BGR for tracker
+        frame_bgr = cv2.cvtColor(frame_eq, cv2.COLOR_GRAY2BGR)
+        return frame_bgr
+
     def reset(self):
         """Reset tracking state."""
         self._state = TrackingState()
@@ -343,10 +467,12 @@ class TrackingEngine:
         """Get current tracking state for debugging."""
         return {
             "is_initialized": self.is_initialized,
+            "tracker_type": self._state.tracker_type,
             "previous_roi": self._state.previous_roi,
             "initial_roi": self._state.initial_roi,
             "confidence_history": self._state.confidence_history[-10:],
-            "avg_confidence": np.mean(self._state.confidence_history[-5:]) if self._state.confidence_history else 0.0
+            "avg_confidence": np.mean(self._state.confidence_history[-5:]) if self._state.confidence_history else 0.0,
+            "roi_mode": self._state.roi_mode
         }
 
 

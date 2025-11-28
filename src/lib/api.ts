@@ -373,11 +373,13 @@ export const trackingApi = {
    * Initialize CSRT tracker for ROI tracking
    * @param params.frameIndex Frame to initialize on
    * @param params.roi ROI bounding box to track
+   * @param params.roiMode ROI tracking mode ("fixed_150x150" or "adaptive")
    */
   async initialize(params: {
     frameIndex: number;
     roi: BoundingBox;
-  }): Promise<{ status: string; frameIndex: number }> {
+    roiMode?: 'fixed_150x150' | 'adaptive';
+  }): Promise<{ status: string; frameIndex: number; roi: BoundingBox; roiMode: string }> {
     const body = {
       frame_index: params.frameIndex,
       roi: {
@@ -386,6 +388,7 @@ export const trackingApi = {
         width: Math.round(params.roi.width),
         height: Math.round(params.roi.height),
       },
+      roi_mode: params.roiMode || 'fixed_150x150',
     };
 
     const response = await fetch(`${API_BASE}/tracking/initialize`, {

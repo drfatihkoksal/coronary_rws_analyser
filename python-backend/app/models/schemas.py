@@ -134,6 +134,7 @@ class TrackingInitRequest(BaseModel):
     """Initialize tracking request (CSRT-only, ROI tracking)."""
     frame_index: int
     roi: BoundingBox
+    roi_mode: str = "fixed_150x150"  # "fixed_150x150" or "adaptive"
     # seed_points removed - using CSRT-only for ROI tracking
 
 

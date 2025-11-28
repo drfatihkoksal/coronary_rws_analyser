@@ -82,9 +82,9 @@ async def initialize_tracker(request: TrackingInitRequest):
     Sets up CSRT tracker for ROI position tracking across frames.
 
     Args:
-        request: Initial frame and ROI
+        request: Initial frame, ROI, and roi_mode ("fixed_150x150" or "adaptive")
     """
-    logger.info(f"Initializing CSRT tracker at frame {request.frame_index}")
+    logger.info(f"Initializing CSRT tracker at frame {request.frame_index}, mode={request.roi_mode}")
 
     # Get DICOM handler
     handler = get_handler()
@@ -104,9 +104,16 @@ async def initialize_tracker(request: TrackingInitRequest):
         request.roi.height
     )
 
+    # Validate roi_mode
+    if request.roi_mode not in ("fixed_150x150", "adaptive"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid roi_mode: {request.roi_mode}. Must be 'fixed_150x150' or 'adaptive'"
+        )
+
     # Initialize tracker (CSRT only)
     engine = get_tracking_engine()
-    success = engine.initialize(frame=frame, roi=roi)
+    success = engine.initialize(frame=frame, roi=roi, roi_mode=request.roi_mode)
 
     if not success:
         raise HTTPException(
@@ -114,10 +121,20 @@ async def initialize_tracker(request: TrackingInitRequest):
             detail="Failed to initialize CSRT tracker"
         )
 
+    # Get actual ROI used (may be adjusted by roi_mode)
+    state = engine.get_state()
+    actual_roi = state.get("initial_roi", roi)
+
     return {
         "status": "initialized",
         "frame_index": request.frame_index,
-        "roi": roi
+        "roi": {
+            "x": actual_roi[0],
+            "y": actual_roi[1],
+            "width": actual_roi[2],
+            "height": actual_roi[3]
+        },
+        "roi_mode": request.roi_mode
     }
 
 

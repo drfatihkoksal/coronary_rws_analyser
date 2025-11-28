@@ -106,3 +106,9 @@ Thumbs.db
 .context/
 .claude/
 akademik/
+
+# Tracker models (large ONNX files)
+python-backend/models/trackers/
+
+# Test scripts
+python-backend/test_*.py

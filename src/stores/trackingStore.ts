@@ -7,7 +7,7 @@
 
 import { create } from 'zustand';
 import { subscribeWithSelector } from 'zustand/middleware';
-import type { BoundingBox, TrackingResult, PropagationProgress } from '../types';
+import type { BoundingBox, TrackingResult, PropagationProgress, RoiMode } from '../types';
 import { trackingApi } from '../lib/api';
 
 interface TrackingState {
@@ -16,6 +16,9 @@ interface TrackingState {
   isTracking: boolean;
   isPropagating: boolean;
   error: string | null;
+
+  // ROI mode setting
+  roiMode: RoiMode;
 
   // Current tracking data
   currentRoi: BoundingBox | null;
@@ -32,6 +35,7 @@ interface TrackingState {
   initialRoi: BoundingBox | null;
 
   // Actions
+  setRoiMode: (mode: RoiMode) => void;
   initialize: (frameIndex: number, roi: BoundingBox) => Promise<boolean>;
   trackFrame: (frameIndex: number) => Promise<TrackingResult | null>;
   propagate: (startFrame: number, endFrame: number, direction?: 'forward' | 'backward') => Promise<void>;
@@ -65,6 +69,7 @@ export const useTrackingStore = create<TrackingState>()(
     isTracking: false,
     isPropagating: false,
     error: null,
+    roiMode: 'fixed_150x150',
     currentRoi: null,
     currentConfidence: 0,
     trackingResults: new Map(),
@@ -72,20 +77,29 @@ export const useTrackingStore = create<TrackingState>()(
     initialFrame: null,
     initialRoi: null,
 
+    // Set ROI mode
+    setRoiMode: (mode) => {
+      set({ roiMode: mode });
+    },
+
     // Initialize CSRT tracker (ROI only)
     initialize: async (frameIndex, roi) => {
+      const { roiMode } = get();
       set({ isTracking: true, error: null });
 
       try {
-        await trackingApi.initialize({ frameIndex, roi });
+        const response = await trackingApi.initialize({ frameIndex, roi, roiMode });
+
+        // Use actual ROI returned by backend (may be adjusted by roi_mode)
+        const actualRoi = response.roi || roi;
 
         set({
           isTracking: false,
           isInitialized: true,
-          currentRoi: roi,
+          currentRoi: actualRoi,
           currentConfidence: 1.0,
           initialFrame: frameIndex,
-          initialRoi: roi,
+          initialRoi: actualRoi,
           trackingResults: new Map(),
         });
 
@@ -246,11 +260,14 @@ export const useTrackingStore = create<TrackingState>()(
         // Ignore reset errors
       }
 
+      // Keep roiMode, reset everything else
+      const { roiMode } = get();
       set({
         isInitialized: false,
         isTracking: false,
         isPropagating: false,
         error: null,
+        roiMode, // Preserve ROI mode setting
         currentRoi: null,
         currentConfidence: 0,
         trackingResults: new Map(),
@@ -267,3 +284,4 @@ export const selectCurrentRoi = (state: TrackingState) => state.currentRoi;
 export const selectIsTracking = (state: TrackingState) => state.isTracking;
 export const selectIsPropagating = (state: TrackingState) => state.isPropagating;
 export const selectPropagationProgress = (state: TrackingState) => state.propagationProgress;
+export const selectRoiMode = (state: TrackingState) => state.roiMode;

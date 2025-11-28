@@ -11,7 +11,7 @@
  * Refactored to use canvas layer system from Coronary Clear Vision V2.2
  */
 
-import { useCallback, useEffect, useRef, useState, WheelEvent, MouseEvent } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { usePlayerStore } from '../../stores/playerStore';
 import { useDicomStore } from '../../stores/dicomStore';
 import { useEcgStore } from '../../stores/ecgStore';
@@ -39,7 +39,7 @@ interface VideoPlayerProps {
 
 export function VideoPlayer({ onFrameChange }: VideoPlayerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
+  const [dimensions, setDimensions] = useState({ width: 512, height: 512 });
   const [interaction, setInteraction] = useState<InteractionType>({ type: 'none' });
   const [cursorStyle, setCursorStyle] = useState('default');
   const lastScrubTime = useRef(0);
@@ -103,23 +103,43 @@ export function VideoPlayer({ onFrameChange }: VideoPlayerProps) {
     setLayerVisibility,
   } = useCanvasLayers({ width: dimensions.width, height: dimensions.height });
 
-  // Update dimensions on resize
+  // Track when container ref is ready
+  const [containerReady, setContainerReady] = useState(false);
+
+  // Callback ref to detect when container is mounted
+  const setContainerRef = useCallback((node: HTMLDivElement | null) => {
+    (containerRef as React.MutableRefObject<HTMLDivElement | null>).current = node;
+    if (node) {
+      setContainerReady(true);
+    }
+  }, []);
+
+  // Update dimensions on resize using ResizeObserver
   useEffect(() => {
+    const container = containerRef.current;
+    console.log('[VideoPlayer] useEffect - container:', container, 'containerReady:', containerReady);
+    if (!container) return;
+
     const updateDimensions = () => {
-      if (containerRef.current) {
-        const rect = containerRef.current.getBoundingClientRect();
-        // Round to integers for canvas dimensions
-        setDimensions({
-          width: Math.floor(rect.width),
-          height: Math.floor(rect.height),
-        });
+      const rect = container.getBoundingClientRect();
+      const newWidth = Math.floor(rect.width);
+      const newHeight = Math.floor(rect.height);
+      console.log('[VideoPlayer] updateDimensions:', { newWidth, newHeight, rect });
+
+      if (newWidth > 0 && newHeight > 0) {
+        setDimensions({ width: newWidth, height: newHeight });
       }
     };
 
+    // Initial update
     updateDimensions();
-    window.addEventListener('resize', updateDimensions);
-    return () => window.removeEventListener('resize', updateDimensions);
-  }, []);
+
+    // Use ResizeObserver for subsequent updates
+    const resizeObserver = new ResizeObserver(updateDimensions);
+    resizeObserver.observe(container);
+
+    return () => resizeObserver.disconnect();
+  }, [containerReady]);
 
   // Playback loop
   useEffect(() => {
@@ -732,23 +752,26 @@ export function VideoPlayer({ onFrameChange }: VideoPlayerProps) {
 
   return (
     <div
-      ref={containerRef}
+      ref={setContainerRef}
       className="w-full h-full relative bg-black overflow-hidden"
       style={{ cursor: cursorStyle }}
     >
       {/* Single composite canvas managed by LayerManager */}
-      <canvas
-        ref={canvasRef}
-        width={dimensions.width}
-        height={dimensions.height}
-        className="absolute inset-0 w-full h-full"
-        onWheel={handleWheel}
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
-        onContextMenu={handleContextMenu}
-      />
+      {containerReady && dimensions.width > 0 && dimensions.height > 0 && (
+        <canvas
+          key={`canvas-${dimensions.width}-${dimensions.height}`}
+          ref={canvasRef}
+          width={dimensions.width}
+          height={dimensions.height}
+          className="absolute inset-0 w-full h-full"
+          onWheel={handleWheel}
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+          onMouseLeave={handleMouseUp}
+          onContextMenu={handleContextMenu}
+        />
+      )}
 
       {/* Frame info overlay */}
       <div className="absolute top-2 left-2 bg-black/50 px-2 py-1 rounded text-xs text-white pointer-events-none">

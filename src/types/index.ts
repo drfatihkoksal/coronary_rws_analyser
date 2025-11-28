@@ -106,6 +106,7 @@ export interface SegmentationResult {
 // ============================================================================
 
 export type TrackingMethod = 'csrt';
+export type RoiMode = 'fixed_150x150' | 'adaptive';
 
 export interface TrackingResult {
   success: boolean;
