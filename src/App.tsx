@@ -1,144 +1,254 @@
 /**
  * Coronary RWS Analyser - Main Application Component
  *
- * This is the root component of the application.
- * It provides the main layout structure:
- * - Header with menu and controls
- * - Left sidebar with tools
- * - Main viewer area (canvas layers)
- * - Right panel with data displays (ECG, QCA, RWS)
- * - Bottom panel with timeline/playback controls
+ * Root component providing the main layout:
+ * - Header with title and status
+ * - Left toolbar with tools
+ * - Main viewer area (multi-layer canvas)
+ * - Right panel with data displays (ECG, QCA, RWS, Tracking, Calibration, Export)
+ * - Bottom panel with playback controls
  */
 
+import { useCallback, useRef, useState } from 'react';
+import { useDicomStore, useEcgStore, useCalibrationStore } from './stores';
+import { VideoPlayer } from './components/Viewer';
+import { PlaybackControls, Toolbar } from './components/Controls';
+import {
+  ECGPanel,
+  QCAPanel,
+  RWSPanel,
+  SegmentationPanel,
+  CalibrationPanel,
+  ExportPanel,
+  TrackingPanel,
+  MetadataDisplay,
+  FrameRangeSelection,
+} from './components/Panels';
+import { Badge, KeyboardShortcuts, SessionManager } from './components/common';
+
+type RightPanelTab = 'analysis' | 'tracking' | 'settings' | 'info';
+
 function App() {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [activeTab, setActiveTab] = useState<RightPanelTab>('analysis');
+
+  const loadFile = useDicomStore((s) => s.loadFile);
+  const isLoading = useDicomStore((s) => s.isLoading);
+  const isLoaded = useDicomStore((s) => s.isLoaded);
+  const error = useDicomStore((s) => s.error);
+  const metadata = useDicomStore((s) => s.metadata);
+
+  const loadEcg = useEcgStore((s) => s.loadEcg);
+  const setFromDicom = useCalibrationStore((s) => s.setFromDicom);
+
+  // Handle file open
+  const handleFileOpen = useCallback(() => {
+    fileInputRef.current?.click();
+  }, []);
+
+  // Handle file selection
+  const handleFileChange = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+
+      try {
+        await loadFile(file);
+        // Load ECG and calibration after DICOM loads
+        loadEcg();
+        setFromDicom();
+      } catch (error) {
+        console.error('Failed to load DICOM:', error);
+      }
+
+      // Reset input
+      e.target.value = '';
+    },
+    [loadFile, loadEcg, setFromDicom]
+  );
+
+  // Handle drag and drop
+  const handleDrop = useCallback(
+    async (e: React.DragEvent) => {
+      e.preventDefault();
+      const file = e.dataTransfer.files[0];
+      if (!file) return;
+
+      try {
+        await loadFile(file);
+        loadEcg();
+        setFromDicom();
+      } catch (error) {
+        console.error('Failed to load DICOM:', error);
+      }
+    },
+    [loadFile, loadEcg, setFromDicom]
+  );
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+  }, []);
+
+  const tabs: { id: RightPanelTab; label: string }[] = [
+    { id: 'analysis', label: 'Analysis' },
+    { id: 'tracking', label: 'Tracking' },
+    { id: 'settings', label: 'Settings' },
+    { id: 'info', label: 'Info' },
+  ];
+
   return (
-    <div className="flex flex-col h-screen bg-gray-900 text-white">
+    <div
+      className="flex flex-col h-screen bg-gray-900 text-white"
+      onDrop={handleDrop}
+      onDragOver={handleDragOver}
+    >
+      {/* Session Manager (auto-save recovery) */}
+      <SessionManager />
+
+      {/* Hidden file input */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".dcm,.dicom,application/dicom"
+        className="hidden"
+        onChange={handleFileChange}
+      />
+
       {/* Header */}
-      <header className="h-12 bg-gray-800 border-b border-gray-700 flex items-center px-4">
+      <header className="h-12 bg-gray-800 border-b border-gray-700 flex items-center px-4 gap-4">
         <h1 className="text-lg font-semibold">Coronary RWS Analyser</h1>
-        <span className="ml-2 text-xs text-gray-400">v1.0.0</span>
+        <span className="text-xs text-gray-400">v1.0.0</span>
+
+        {/* Loading indicator */}
+        {isLoading && (
+          <Badge variant="info">Loading...</Badge>
+        )}
+
+        {/* Error indicator */}
+        {error && (
+          <Badge variant="danger">{error}</Badge>
+        )}
+
+        {/* File info */}
+        {isLoaded && metadata && (
+          <span className="text-xs text-gray-400 ml-auto">
+            {metadata.numFrames} frames | {metadata.rows}x{metadata.columns}
+            {metadata.pixelSpacing && (
+              <span className="ml-2">
+                | {metadata.pixelSpacing[0].toFixed(4)} mm/px
+              </span>
+            )}
+          </span>
+        )}
       </header>
 
       {/* Main Content */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Left Sidebar - Tools */}
-        <aside className="w-16 bg-gray-800 border-r border-gray-700 flex flex-col items-center py-4 gap-4">
-          <div className="w-10 h-10 bg-gray-700 rounded-lg flex items-center justify-center text-gray-400 hover:bg-gray-600 cursor-pointer">
-            {/* File icon placeholder */}
-            <span className="text-xs">File</span>
-          </div>
-          <div className="w-10 h-10 bg-gray-700 rounded-lg flex items-center justify-center text-gray-400 hover:bg-gray-600 cursor-pointer">
-            {/* Seed point icon placeholder */}
-            <span className="text-xs">Seed</span>
-          </div>
-          <div className="w-10 h-10 bg-gray-700 rounded-lg flex items-center justify-center text-gray-400 hover:bg-gray-600 cursor-pointer">
-            {/* ROI icon placeholder */}
-            <span className="text-xs">ROI</span>
-          </div>
-        </aside>
+        {/* Left Toolbar */}
+        <Toolbar onFileOpen={handleFileOpen} />
 
         {/* Main Viewer Area */}
         <main className="flex-1 flex flex-col">
-          {/* Canvas Container */}
-          <div className="flex-1 bg-black flex items-center justify-center">
-            <div className="text-gray-500 text-center">
-              <p className="text-xl mb-2">Coronary RWS Analyser</p>
-              <p className="text-sm">Open a DICOM file to begin analysis</p>
-              <p className="text-xs mt-4 text-gray-600">
-                File → Open DICOM or drag and drop
-              </p>
-            </div>
+          {/* Video Player */}
+          <div className="flex-1 relative">
+            <VideoPlayer />
           </div>
 
-          {/* Timeline / Playback Controls */}
-          <div className="h-24 bg-gray-800 border-t border-gray-700 p-2">
-            <div className="h-full flex flex-col">
-              {/* Frame slider placeholder */}
-              <div className="flex-1 bg-gray-700 rounded mb-2"></div>
-              {/* Playback buttons placeholder */}
-              <div className="flex items-center justify-center gap-4">
-                <button className="px-3 py-1 bg-gray-700 rounded hover:bg-gray-600 text-sm">
-                  ⏮ Prev
-                </button>
-                <button className="px-4 py-1 bg-primary-600 rounded hover:bg-primary-500 text-sm">
-                  ▶ Play
-                </button>
-                <button className="px-3 py-1 bg-gray-700 rounded hover:bg-gray-600 text-sm">
-                  Next ⏭
-                </button>
-                <span className="text-gray-400 text-sm ml-4">
-                  Frame: 0 / 0
-                </span>
-              </div>
-            </div>
+          {/* Playback Controls */}
+          <div className="h-24 bg-gray-800 border-t border-gray-700">
+            <PlaybackControls />
           </div>
         </main>
 
-        {/* Right Panel - Data Displays */}
+        {/* Right Panel - Tabbed Interface */}
         <aside className="w-80 bg-gray-800 border-l border-gray-700 flex flex-col">
-          {/* ECG Panel */}
-          <div className="h-32 border-b border-gray-700 p-2">
-            <div className="text-xs text-gray-400 mb-1">ECG</div>
-            <div className="h-20 bg-gray-900 rounded flex items-center justify-center text-gray-600 text-xs">
-              ECG waveform will appear here
-            </div>
+          {/* Tabs */}
+          <div className="flex border-b border-gray-700">
+            {tabs.map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`flex-1 px-3 py-2 text-xs font-medium transition-colors ${
+                  activeTab === tab.id
+                    ? 'bg-gray-700 text-white border-b-2 border-blue-500'
+                    : 'text-gray-400 hover:text-white hover:bg-gray-700/50'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
           </div>
 
-          {/* QCA Panel */}
-          <div className="flex-1 border-b border-gray-700 p-2 overflow-auto">
-            <div className="text-xs text-gray-400 mb-2">QCA Metrics</div>
-            <div className="space-y-2 text-sm">
-              <div className="flex justify-between">
-                <span className="text-gray-400">MLD:</span>
-                <span>-- mm</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-400">Proximal RD:</span>
-                <span>-- mm</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-400">Distal RD:</span>
-                <span>-- mm</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-400">DS%:</span>
-                <span>-- %</span>
-              </div>
-            </div>
-          </div>
+          {/* Tab Content */}
+          <div className="flex-1 overflow-y-auto">
+            {activeTab === 'analysis' && (
+              <div className="flex flex-col h-full">
+                {/* ECG Panel */}
+                <div className="h-24 border-b border-gray-700 flex-shrink-0">
+                  <ECGPanel />
+                </div>
 
-          {/* RWS Panel - Primary Feature */}
-          <div className="h-48 p-2">
-            <div className="text-xs text-gray-400 mb-2">
-              RWS (Radial Wall Strain)
-            </div>
-            <div className="space-y-2 text-sm">
-              <div className="flex justify-between items-center">
-                <span className="text-gray-400">MLD RWS:</span>
-                <span className="text-lg font-semibold text-vessel-mld">
-                  -- %
-                </span>
+                {/* Segmentation Panel */}
+                <div className="p-3 border-b border-gray-700">
+                  <SegmentationPanel />
+                </div>
+
+                {/* QCA Panel */}
+                <div className="p-3 border-b border-gray-700">
+                  <QCAPanel />
+                </div>
+
+                {/* RWS Panel - Primary Feature */}
+                <div className="p-3 border-b border-gray-700">
+                  <FrameRangeSelection />
+                </div>
+
+                <div className="p-3 flex-1">
+                  <RWSPanel />
+                </div>
               </div>
-              <div className="flex justify-between">
-                <span className="text-gray-400">Proximal RWS:</span>
-                <span>-- %</span>
+            )}
+
+            {activeTab === 'tracking' && (
+              <div className="p-3">
+                <TrackingPanel />
               </div>
-              <div className="flex justify-between">
-                <span className="text-gray-400">Distal RWS:</span>
-                <span>-- %</span>
+            )}
+
+            {activeTab === 'settings' && (
+              <div className="p-3 space-y-4">
+                <CalibrationPanel />
+                <div className="border-t border-gray-700 pt-4">
+                  <ExportPanel />
+                </div>
               </div>
-              <div className="mt-4 p-2 bg-gray-900 rounded text-xs text-gray-500">
-                Normal: &lt;8% | Intermediate: 8-12% | High: &gt;12%
+            )}
+
+            {activeTab === 'info' && (
+              <div className="p-3 space-y-4">
+                <MetadataDisplay />
+                <div className="border-t border-gray-700 pt-4">
+                  <KeyboardShortcuts />
+                </div>
               </div>
-            </div>
+            )}
           </div>
         </aside>
       </div>
 
       {/* Status Bar */}
       <footer className="h-6 bg-gray-800 border-t border-gray-700 flex items-center px-4 text-xs text-gray-400">
-        <span>Ready</span>
-        <span className="ml-auto">Backend: Disconnected</span>
+        <span>{isLoaded ? 'Ready' : 'No file loaded'}</span>
+        <span className="ml-4">
+          Press <kbd className="bg-gray-700 px-1 rounded">B</kbd> for ROI,{' '}
+          <kbd className="bg-gray-700 px-1 rounded">S</kbd> for Seed,{' '}
+          <kbd className="bg-gray-700 px-1 rounded">?</kbd> for shortcuts
+        </span>
+        <span className="ml-auto flex items-center gap-2">
+          <KeyboardShortcuts compact />
+          Backend:{' '}
+          <span className="text-green-400">Connected</span>
+        </span>
       </footer>
     </div>
   );

@@ -15,6 +15,28 @@ Endpoints:
 - /ws: WebSocket for real-time updates
 """
 
+import os
+from pathlib import Path
+
+# Backend root directory
+BACKEND_DIR = Path(__file__).parent.parent.resolve()
+
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    env_path = BACKEND_DIR / '.env'
+    if env_path.exists():
+        load_dotenv(env_path)
+except ImportError:
+    pass  # python-dotenv not installed, use system env vars
+
+# Resolve relative nnUNet_results path to absolute
+nnunet_results = os.environ.get('nnUNet_results')
+if nnunet_results and not os.path.isabs(nnunet_results):
+    abs_path = (BACKEND_DIR / nnunet_results).resolve()
+    if abs_path.exists():
+        os.environ['nnUNet_results'] = str(abs_path)
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
@@ -37,13 +59,14 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# Configure CORS
+# Configure CORS - Allow all origins for development
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify exact origins
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,  # Must be False when allow_origins=["*"]
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # Import and include routers

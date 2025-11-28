@@ -2,214 +2,440 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project Overview
+**Proje:** Coronary RWS Analyser - Koroner anjiyografi videolarından Radial Wall Strain (RWS) hesaplayan açık kaynaklı masaüstü uygulaması.
+**Hedef:** JOSS (Journal of Open Source Software) yayını
 
-**Coronary RWS Analyser** - Open-source Radial Wall Strain analysis platform for coronary angiography. Primary goal: Calculate RWS from angiography videos with academic-grade documentation for publication.
+---
 
-**Key Differentiator:** First open-source tool for RWS analysis.
+## Geliştirme Öncesi
 
-## Critical Reading Order
+Karar almadan önce şu dosyaları oku:
+- `.context/decision.log` - Tüm mimari kararlar + gerekçeler
+- `.context/00-vision.md` - Proje vizyonu
+- `.context/domain/rws-methodology.md` - RWS klinik arka planı
 
-1. **`.context/00-vision.md`** - Project goals and scope
-2. **`.context/decision.log`** - All architectural decisions with rationale
-3. **`.context/01-requirements.md`** - Functional/non-functional requirements
-4. **`.context/architecture/overview.md`** - System architecture
-5. **`.context/domain/rws-methodology.md`** - RWS clinical background
+**Karar aldıktan sonra:** `decision.log` dosyasını güncelle.
 
-**After making decisions:** Update `decision.log` with rationale and references.
+---
 
-## Development Commands
+## Komutlar
 
-### Start Development
+### Kurulum
+
 ```bash
-npm run dev:full  # Backend + Tauri (WSL/Linux)
-# OR manually:
-# Terminal 1: npm run tauri:dev
-# Terminal 2: cd python-backend && uvicorn app.main:app --reload --port 8000
+# Frontend
+npm install
+
+# Python backend
+cd python-backend
+python -m venv venv
+source venv/bin/activate          # Linux/WSL/Mac
+# Windows CMD: venv\Scripts\activate.bat
+# Windows PowerShell: venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+
+# GPU (CUDA 12.1) için:
+pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
 ```
 
-### Build & Test
+### Geliştirme
+
 ```bash
-npm run build           # TypeScript check + Vite build
-npm run tauri:build     # Production build
-cd python-backend && pytest tests/  # Python tests
+# Önerilen - Backend + Tauri paralel başlat
+npm run dev:full
+
+# Manuel (iki terminal):
+npm run tauri:dev           # Terminal 1: Tauri + React (localhost:1420)
+npm run backend:dev         # Terminal 2: FastAPI (localhost:8000)
+
+# Sadece React (Tauri olmadan):
+npm run dev                 # Vite dev server (localhost:5173)
 ```
 
-### Health Checks
+### Build, Lint, Test
+
 ```bash
+npm run tauri:build         # Production build (.exe/.dmg/.AppImage)
+npm run build               # TypeScript type-check + Vite build
+npm run lint                # ESLint
+npm run typecheck           # TypeScript only
+
+# Python testleri
+cd python-backend && pytest tests/
+cd python-backend && pytest tests/test_qca.py -v  # Tek test dosyası
+cd python-backend && pytest tests/ -k "test_name"  # Tek test
+
+# Health check
 curl http://127.0.0.1:8000/health
-curl http://127.0.0.1:8000/qca/health
-curl http://127.0.0.1:8000/rws/health
 ```
 
-## Tech Stack
+---
 
-**Frontend:** Tauri 2.x, React 18, TypeScript (strict), Zustand (8 stores), Radix UI, Tailwind CSS
+## Teknoloji Stack'i
 
-**Backend:** Python 3.10+, FastAPI, PyTorch, OpenCV 4.10+ (opencv-contrib-python), pydicom
+- **Frontend:** Tauri 2.x, React 18, TypeScript (strict), Zustand 5, Radix UI, Tailwind CSS
+- **Backend:** Python 3.10+, FastAPI, PyTorch 2.x, OpenCV (opencv-contrib-python for CSRT)
+- **Segmentation:** Custom nnU-Net v2 (dual-channel: image + Gaussian spatial map)
+- **Charts:** Recharts (ECG visualization, diameter profiles)
 
-**Segmentation:** Custom nnU-Net v2 (dual-channel: image + Gaussian spatial attention)
+---
 
-**Tracking:** Hybrid CSRT + Template Matching + Optical Flow
+## Mimari Prensipler
 
-## Architecture Principles
+### 1. Layer-by-Layer Geliştirme (DECISION-006)
 
-### 1. Layer-by-Layer Development
 ```
-Phase 1: Backend API stubs + core engines
-Phase 2: Zustand stores
-Phase 3: UI components
-Phase 4: Integration
+Phase 1: Backend API + Core Engines  ✓
+Phase 2: Zustand Stores              ✓
+Phase 3: UI Components               ✓
+Phase 4: Integration & Testing       ← ŞİMDİKİ AŞAMA
+Phase 5: Academic Validation
 ```
 
-### 2. Map-Based Per-Frame Storage
+Her faz önceki fazın üzerine inşa edilir. UI, altyapı tamamlanmadan yazılmaz.
+
+### 2. Map-Based Per-Frame Storage (V2.2'den korundu)
+
 ```typescript
-// All frame-indexed data uses Map<number, T>
-masks: Map<number, Uint8Array>
-centerlines: Map<number, Point[]>
-qcaMetrics: Map<number, QCAResult>
+// Tüm frame-indexed data Map<number, T> kullanır
+interface SegmentationStore {
+  masks: Map<number, Uint8Array>;          // frame → mask
+  centerlines: Map<number, Point[]>;       // frame → centerline
+  probabilityMaps: Map<number, Float32Array>;
+
+  getMask: (frameIndex: number) => Uint8Array | undefined;
+  setMask: (frameIndex: number, mask: Uint8Array) => void;
+}
 ```
+
+**Neden Map?**
+- Sparse storage (sadece işlenmiş frame'ler tutulur)
+- O(1) erişim
+- Kolay frame clearing
+- LRU cache için uygun (ileride)
 
 ### 3. Transform Version Sync (Canvas Layers)
+
 ```typescript
-// Increment on zoom/pan to sync all layers
-viewTransformVersion: number
+// Zoom/pan'de tüm layer'ları senkronize et
+const [viewTransform, setViewTransform] = useState({ scale: 1, x: 0, y: 0 });
+const [viewTransformVersion, setViewTransformVersion] = useState(0);
+
+// Transform değiştiğinde version'ı artır
+const handleZoom = () => {
+  setViewTransform(newTransform);
+  setViewTransformVersion(v => v + 1);  // Tüm layer'lar bunu dinler
+};
 ```
 
-### 4. getState() in Async Contexts
+### 4. getState() in Async Contexts (V2.2'den öğrenilen)
+
 ```typescript
-// Always use getState() in async callbacks
-const frame = usePlayerStore.getState().currentFrame;
+// ❌ YANLIŞ - async callback'te stale state
+setCurrentFrame((prev) => prev + 1);
+
+// ✅ DOĞRU - güncel state
+const currentFrame = usePlayerStore.getState().currentFrame;
+setCurrentFrame(currentFrame + 1);
 ```
 
-## Zustand Stores (8 total)
+### 5. Callback Ref Pattern (Canvas)
 
-| Store | Responsibility |
-|-------|---------------|
-| `playerStore` | Playback, current frame, speed |
-| `dicomStore` | Metadata, frames (base64), pixel spacing |
-| `ecgStore` | ECG data, R-peaks, beat boundaries |
-| `segmentationStore` | Masks, centerlines (Map-based) |
-| `trackingStore` | ROI, confidence, progress |
-| `qcaStore` | QCA metrics per frame (Map-based) |
-| `rwsStore` | RWS results per beat |
-| `calibrationStore` | Pixel-to-mm calibration |
-
-## Critical Bugs to Avoid
-
-### 1. Coordinate Swap (Python ↔ TypeScript)
-```python
-# Python extractors return (y, x)
-# Canvas needs (x, y)
-centerline_canvas = [(float(x), float(y)) for y, x in coords]
-```
-
-### 2. Optical Flow Requirements
-```python
-# MUST be grayscale uint8
-frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-frame = frame.astype(np.uint8)
-```
-
-### 3. CSRT Tracker API
-```python
-# OpenCV version-dependent
-try:
-    tracker = cv2.legacy.TrackerCSRT_create()
-except:
-    tracker = cv2.TrackerCSRT_create()
-```
-
-### 4. Canvas Callback Ref
 ```typescript
-// Use callback ref, not useRef
-const canvasRef = useCallback((canvas) => {
+// ❌ YANLIŞ - timing issues
+const canvasRef = useRef<HTMLCanvasElement>(null);
+useEffect(() => {
+  if (canvasRef.current) init(canvasRef.current);
+}, []);
+
+// ✅ DOĞRU - DOM hazır garantisi
+const canvasRef = useCallback((canvas: HTMLCanvasElement | null) => {
   if (canvas) init(canvas);
 }, []);
 ```
 
-## API Endpoints
+---
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/dicom/load` | POST | Load DICOM file |
-| `/dicom/frame/{idx}` | GET | Get frame (base64) |
-| `/dicom/ecg` | GET | ECG data + R-peaks |
-| `/segmentation/segment` | POST | Run segmentation |
-| `/segmentation/centerline` | POST | Extract centerline |
-| `/tracking/initialize` | POST | Init CSRT tracker |
-| `/tracking/track` | POST | Track single frame |
-| `/tracking/propagate` | POST | Auto-propagate |
-| `/qca/calculate` | POST | Calculate QCA |
-| `/rws/calculate` | POST | Calculate RWS |
-| `/export/csv` | POST | Export to CSV |
-| `/export/pdf` | POST | Generate PDF report |
-| `/ws/tracking` | WS | Real-time tracking updates |
+## Zustand Store'ları (8 adet)
 
-## RWS Calculation (Primary Feature)
-
-```python
-# Per cardiac beat, at each measurement point (MLD, Proximal, Distal):
-Dmax = max([diameter[frame] for frame in beat_frames])
-Dmin = min([diameter[frame] for frame in beat_frames])
-RWS = (Dmax - Dmin) / Dmax * 100  # percentage
-
-# Clinical interpretation:
-# < 8%: Normal
-# 8-12%: Intermediate
-# > 12-14%: Possible vulnerable plaque
-```
-
-## File Organization
-
-```
-coronary_rws_analyser/
-├── .context/              # Meta: vision, decisions, requirements
-├── akademik/              # Academic: literature, manuscript
-├── .claude/commands/      # Custom slash commands
-├── src/                   # React frontend
-│   ├── components/        # UI components
-│   ├── stores/            # Zustand stores
-│   └── lib/               # API client, utilities
-├── src-tauri/             # Tauri (Rust)
-├── python-backend/        # FastAPI backend
-│   ├── app/api/           # API routers
-│   ├── app/core/          # Core engines
-│   └── app/models/        # Pydantic schemas
-└── docs/                  # User documentation
-```
-
-## Documentation Standards
-
-### Code Comments
-- Document **why**, not **what**
-- Reference papers for algorithms: `# Ref: Hong et al., 2023, Eq. 3`
-- Mark TODOs with context: `# TODO(academic): Add validation metrics`
-
-### Decision Logging
-When making architectural decisions:
-1. Add entry to `.context/decision.log`
-2. Include alternatives considered
-3. Reference supporting literature
-4. Document consequences
-
-## Performance Targets
-
-- Video: 30 FPS @ 4K, 60 FPS @ FHD
-- Segmentation: <300ms (CPU), <100ms (GPU)
-- Tracking: <350ms per frame
-- QCA: <50ms per frame
-- RWS: <10ms per beat
-
-## Academic Requirements
-
-This project will be published. Ensure:
-1. All algorithms have literature references
-2. Decision rationale is documented
-3. Code is readable and well-commented
-4. Validation metrics are tracked
-5. Reproducibility is maintained
+| Store | Sorumluluk | Map-based? |
+|-------|------------|------------|
+| `playerStore` | Playback, current frame, speed, loop | No |
+| `dicomStore` | Metadata, frames (base64), pixel spacing | Frames: Map |
+| `ecgStore` | ECG data, R-peaks, beat boundaries | No |
+| `segmentationStore` | Masks, centerlines, probability maps | Yes |
+| `trackingStore` | ROI, confidence, progress | Per-frame: Map |
+| `qcaStore` | QCA metrics per frame | Yes |
+| `rwsStore` | RWS results per beat | Yes |
+| `calibrationStore` | Pixel-to-mm calibration | No |
 
 ---
 
-*Last Updated: 2024-11-24*
+## Core Engine'ler (Backend)
+
+### 1. DicomHandler (`app/core/dicom_handler.py`)
+
+```python
+class DicomHandler:
+    """DICOM dosya işleme"""
+
+    def load(self, path: str) -> DicomData
+    def get_frame(self, index: int) -> np.ndarray
+    def get_metadata(self) -> DicomMetadata
+    def extract_ecg(self) -> ECGData  # Siemens format
+    def detect_r_peaks(self) -> List[int]
+```
+
+### 2. Segmentation Engines
+
+**nnU-Net (`app/core/nnunet_inference.py`)** - Custom dual-channel model:
+```python
+class NNUNetInference:
+    def segment(self, image: np.ndarray, roi: BoundingBox) -> SegmentationResult
+    def generate_gaussian_map(self, shape: Tuple, sigma: float = 35) -> np.ndarray
+    # Pipeline: ROI crop → Dual-channel → Inference → Post-process
+```
+
+**AngioPy (`app/core/angiopy_segmentation.py`)** - Alternative InceptionResNetV2+U-Net:
+```python
+class AngioPySegmentation:
+    def segment(self, image: np.ndarray) -> np.ndarray  # Returns binary mask
+```
+
+### 3. CenterlineExtractor (`app/core/centerline_extractor.py`)
+
+```python
+class CenterlineExtractor:
+    """Skeleton-based centerline extraction"""
+
+    def extract(self, mask: np.ndarray) -> List[Tuple[float, float]]
+    def smooth_bspline(self, points: List[Tuple]) -> List[Tuple]
+```
+
+### 4. TrackingEngine (`app/core/tracking_engine.py`)
+
+```python
+class TrackingEngine:
+    """Hybrid CSRT + Template + Optical Flow"""
+
+    def initialize(self, frame: np.ndarray, roi: BoundingBox, seed_points: List[Point])
+    def track(self, frame: np.ndarray) -> TrackingResult
+    def propagate(self, frames: List[np.ndarray], start: int, end: int) -> Generator
+
+    # Confidence scoring: 5-frame rolling window
+    # Auto-stop threshold: 0.6
+```
+
+### 5. QCAEngine (`app/core/qca_engine.py`)
+
+```python
+class QCAEngine:
+    """Quantitative Coronary Analysis"""
+
+    def calculate(self, mask: np.ndarray, centerline: List[Point], pixel_spacing: float) -> QCAResult
+    def profile_diameters(self, n_points: int = 50) -> List[float]
+    def find_mld(self) -> MLDResult
+    def calculate_stenosis(self) -> float  # DS%
+```
+
+### 6. RWSEngine (`app/core/rws_engine.py`) - **ANA ÖZELLİK**
+
+```python
+class RWSEngine:
+    """Radial Wall Strain calculation"""
+
+    def calculate(self, diameters: Dict[int, QCAResult], beat_frames: List[int]) -> RWSResult
+
+    # Formula: RWS = (Dmax - Dmin) / Dmax × 100%
+
+    # Output positions:
+    # - MLD RWS (en önemli)
+    # - Proximal RD RWS
+    # - Distal RD RWS
+```
+
+### 7. CalibrationEngine (`app/core/calibration_engine.py`)
+
+```python
+class CalibrationEngine:
+    """Pixel-to-mm calibration from catheter or known objects"""
+
+    def calibrate_from_catheter(self, image: np.ndarray, known_diameter_mm: float) -> float
+    def calibrate_manual(self, pixel_distance: float, mm_distance: float) -> float
+```
+
+---
+
+## API Endpoint'leri
+
+API dokümantasyonu: http://127.0.0.1:8000/docs
+
+Temel endpoint'ler: `/dicom`, `/segmentation`, `/tracking`, `/qca`, `/rws`, `/calibration`, `/export`
+
+### Frontend → Backend İletişimi
+
+API client (`src/lib/api.ts`) tüm backend çağrılarını yönetir:
+
+```typescript
+import { api } from '@/lib/api';
+
+// DICOM yükleme
+const metadata = await api.dicom.load(filePath);
+const frame = await api.dicom.getFrame(frameIndex);
+
+// Segmentation
+const result = await api.segmentation.segment(frameIndex, roi);
+
+// Tracking
+await api.tracking.initialize(roi, seedPoints);
+const trackResult = await api.tracking.propagate(startFrame, endFrame);
+
+// QCA & RWS
+const qca = await api.qca.calculate(frameIndex);
+const rws = await api.rws.calculate(beatFrames);
+```
+
+---
+
+## RWS Hesaplama (Ana Özellik)
+
+```python
+RWS = (Dmax - Dmin) / Dmax × 100%
+# <8%: Normal, 8-12%: Intermediate, >12%: Vulnerable plak
+# Ref: Hong et al., EuroIntervention 2023
+```
+
+Her kardiyak beat için 3 noktada hesaplanır: MLD RWS (en önemli), Proximal RD, Distal RD
+
+---
+
+## Kritik Hatalardan Kaçınma
+
+### 1. Koordinat Sistemi (y,x) ↔ (x,y)
+
+```python
+# Python extractors (y, x) döndürür
+# Canvas (x, y) bekler
+
+# ❌ YANLIŞ - Görüntü yansır
+centerline_canvas = [(float(y), float(x)) for y, x in coords]
+
+# ✅ DOĞRU - Swap yap
+centerline_canvas = [(float(x), float(y)) for y, x in coords]
+```
+
+### 2. Optical Flow Gereksinimleri
+
+```python
+# ❌ YANLIŞ - Sessizce başarısız olur
+flow = cv2.calcOpticalFlowPyrLK(prev, next, ...)  # RGB veya float32
+
+# ✅ DOĞRU - Grayscale uint8 zorunlu
+if len(frame.shape) == 3:
+    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+if frame.dtype != np.uint8:
+    frame = cv2.normalize(frame, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+```
+
+### 3. CSRT Tracker API (OpenCV version-dependent)
+
+```python
+try:
+    # OpenCV >= 4.5.1
+    tracker = cv2.legacy.TrackerCSRT_create()
+except AttributeError:
+    # OpenCV < 4.5.1
+    tracker = cv2.TrackerCSRT_create()
+```
+
+### 4. nnU-Net 2D Input Shape
+
+```python
+# nnU-Net 2D, (C, 1, H, W) bekler (singleton Z dimension)
+input_array = dual_channel[:, np.newaxis, :, :]  # (2, 1, H, W)
+```
+
+---
+
+## Canvas Layer Mimarisi (Frontend)
+
+Video görüntüleme için katmanlı canvas sistemi (`src/lib/canvas/`):
+
+```typescript
+// LayerManager coordinates all canvas layers
+class LayerManager {
+  private layers: Layer[] = [];      // VideoLayer, SegmentationLayer, AnnotationLayer, OverlayLayer
+  private transform: ViewTransform;  // Shared zoom/pan state
+
+  render(frameIndex: number): void   // Render all layers in order
+  setTransform(t: ViewTransform): void
+}
+
+// Each layer implements Layer interface
+interface Layer {
+  render(ctx: CanvasRenderingContext2D, frameIndex: number): void;
+  setTransform(transform: ViewTransform): void;
+}
+```
+
+**Katmanlar (alt→üst):**
+1. `VideoLayer` - DICOM frame görüntüsü
+2. `SegmentationLayer` - Mask overlay (yarı-şeffaf)
+3. `AnnotationLayer` - ROI, centerline, landmarks
+4. `OverlayLayer` - Ölçümler, etiketler, crosshair
+
+---
+
+## Klasör Yapısı
+
+```
+src/                    # React frontend
+  components/           # UI components (Viewer/, Controls/, Panels/, common/)
+  stores/               # Zustand stores (8 adet)
+  lib/                  # Utilities (api.ts, canvas/, sessionUtils.ts)
+  hooks/                # Custom hooks (useCanvasLayers.ts)
+  types/                # TypeScript types
+src-tauri/              # Tauri (Rust) desktop shell
+python-backend/         # FastAPI backend
+  app/api/              # API routers (dicom, segmentation, tracking, qca, rws)
+  app/core/             # Core engines (DicomHandler, TrackingEngine, QCAEngine, RWSEngine)
+  app/models/           # Pydantic schemas
+.context/               # Meta dokümantasyon (decision.log, vision, requirements)
+0000000B                # Test DICOM dosyası (56 frames, 512x512, ECG metadata)
+```
+
+---
+
+## Bilinen Sorunlar ve Çözümler
+
+| Sorun | Çözüm |
+|-------|-------|
+| CSRT bulunamıyor | `pip install opencv-contrib-python` |
+| Optical flow NaN | uint8 grayscale kullan (RGB/float32 değil) |
+| Mask yansıması | Koordinat (y,x)→(x,y) swap yap |
+| İlk Rust build yavaş | Normal (~5-10dk, sonrakiler <30sn) |
+| nnU-Net shape error | `[:, np.newaxis, :, :]` ekle (Z dimension) |
+
+---
+
+## Akademik Gereksinimler
+
+Bu proje JOSS yayını hedefliyor:
+- Her algoritma için **literatür referansı** ekle
+- **decision.log** güncel tut
+- TODO format: `# TODO(academic):`, `# TODO(performance):`, `# TODO(v1.1):`
+
+---
+
+## Yeni Özellik Workflow
+
+1. `.context/decision.log` → Karar yaz
+2. `PROGRESS.md` → Task'ı ekle
+3. Backend: `python-backend/app/core/` (engine) → `app/api/` (router)
+4. Frontend: `src/stores/` (Zustand) → `src/components/`
+5. Test yaz + Commit
+
+---
+
+*Son Güncelleme: 2025-11-28*
+*Durum: Phase 4 - Integration & Testing*

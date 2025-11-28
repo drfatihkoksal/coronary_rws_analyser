@@ -13,6 +13,10 @@ torchvision>=0.15.0
 # nnU-Net v2 for custom segmentation model
 nnunetv2>=2.2
 
+# AngioPy segmentation (U-Net + InceptionResNetV2)
+segmentation-models-pytorch>=0.3.3
+timm>=0.9.0  # Required for smp encoders
+
 # Computer Vision
 opencv-contrib-python>=4.10.0  # Includes CSRT tracker
 scikit-image>=0.22.0
