@@ -201,6 +201,19 @@
 
 ## Changelog
 
+### 2025-11-28
+- **Major GitHub Push:** Complete Phase 1-3 implementation pushed to repository
+- **CLAUDE.md Update:** Enhanced documentation with:
+  - Canvas Layer architecture documentation
+  - API client usage examples
+  - Windows-specific setup commands
+  - CalibrationEngine documentation
+  - Updated folder structure
+- **Documentation Update:** All .context/ files updated with implementation status
+- **Academic Files:** akademik/README.md updated with development progress
+- **Decision Log:** Added DECISION-010, 011, 012 (Canvas, API Client, Phase completion)
+- **Repository:** https://github.com/drfatihkoksal/coronary_rws_analyser
+
 ### 2024-11-25
 - Phase 4 Integration & Testing (80%)
 - TypeScript type check passes
@@ -243,4 +256,4 @@
 
 ---
 
-*Last Updated: 2024-11-25*
+*Last Updated: 2025-11-28*
