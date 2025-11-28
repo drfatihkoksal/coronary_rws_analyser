@@ -238,77 +238,56 @@ export function VideoPlayer({ onFrameChange }: VideoPlayerProps) {
   }, [isInitialized, currentFrame, frameData, getMask, updateSegmentationLayer]);
 
   // Update annotation layer when frame changes
+  // Pass IMAGE coordinates - AnnotationLayer applies transform internally
   useEffect(() => {
     if (!isInitialized) return;
 
-    const videoLayer = getVideoLayer();
-    if (!videoLayer) return;
+    // Get seed points for current frame (image coordinates)
+    const seedPoints = getSeedPoints(currentFrame);
 
-    // Get seed points for current frame and convert to canvas coordinates
-    const seedPointsImage = getSeedPoints(currentFrame);
-    const seedPointsCanvas = seedPointsImage.map((p) => videoLayer.imageToCanvas(p.x, p.y));
+    // Get ROI for current frame (image coordinates)
+    const roi = getROI(currentFrame);
 
-    // Get ROI for current frame and convert to canvas coordinates
-    const roiImage = getROI(currentFrame);
-    let roiCanvas = undefined;
-    if (roiImage) {
-      const topLeft = videoLayer.imageToCanvas(roiImage.x, roiImage.y);
-      const bottomRight = videoLayer.imageToCanvas(
-        roiImage.x + roiImage.width,
-        roiImage.y + roiImage.height
-      );
-      roiCanvas = {
-        x: topLeft.x,
-        y: topLeft.y,
-        width: bottomRight.x - topLeft.x,
-        height: bottomRight.y - topLeft.y,
-      };
-    }
-
-    // Get centerline for current frame
+    // Get centerline for current frame (image coordinates)
     const centerlineImage = getCenterline(currentFrame);
     let centerlines = undefined;
     if (centerlineImage && centerlineImage.length > 0) {
-      const centerlineCanvas = centerlineImage.map((p) => videoLayer.imageToCanvas(p.x, p.y));
-      centerlines = [{ points: centerlineCanvas, color: '#00FF00', width: 2 }];
+      centerlines = [{ points: centerlineImage, color: '#00FF00', width: 2 }];
     }
 
-    // Get YOLO keypoints for current frame
+    // Get YOLO keypoints for current frame (image coordinates)
     const yoloKeypointsImage = getYoloKeypoints(currentFrame);
     const keypointNames = ['start', 'quarter', 'center', '3/4', 'end'];
     let yoloKeypoints = undefined;
     if (yoloKeypointsImage && yoloKeypointsImage.length > 0) {
       yoloKeypoints = yoloKeypointsImage.map((p, i) => ({
-        point: videoLayer.imageToCanvas(p.x, p.y),
+        point: p,
         name: keypointNames[i] || `kp${i}`,
       }));
     }
 
-    // Get QCA markers
+    // Get QCA markers (image coordinates)
     const qcaMetrics = getQcaMetrics(currentFrame);
     let diameterMarkers = undefined;
     if (qcaMetrics) {
       diameterMarkers = [];
       if (qcaMetrics.mldPosition) {
-        const canvasPoint = videoLayer.imageToCanvas(qcaMetrics.mldPosition.x, qcaMetrics.mldPosition.y);
         diameterMarkers.push({
-          point: canvasPoint,
+          point: qcaMetrics.mldPosition,
           diameter: qcaMetrics.mld,
           type: 'MLD' as const,
         });
       }
       if (qcaMetrics.proximalRdPosition) {
-        const canvasPoint = videoLayer.imageToCanvas(qcaMetrics.proximalRdPosition.x, qcaMetrics.proximalRdPosition.y);
         diameterMarkers.push({
-          point: canvasPoint,
+          point: qcaMetrics.proximalRdPosition,
           diameter: qcaMetrics.proximalRd,
           type: 'Proximal' as const,
         });
       }
       if (qcaMetrics.distalRdPosition) {
-        const canvasPoint = videoLayer.imageToCanvas(qcaMetrics.distalRdPosition.x, qcaMetrics.distalRdPosition.y);
         diameterMarkers.push({
-          point: canvasPoint,
+          point: qcaMetrics.distalRdPosition,
           diameter: qcaMetrics.distalRd,
           type: 'Distal' as const,
         });
@@ -316,9 +295,9 @@ export function VideoPlayer({ onFrameChange }: VideoPlayerProps) {
     }
 
     updateAnnotationLayer({
-      seedPoints: seedPointsCanvas,
+      seedPoints,
       yoloKeypoints,
-      roi: roiCanvas,
+      roi,
       centerlines,
       diameterMarkers,
     });
@@ -332,7 +311,6 @@ export function VideoPlayer({ onFrameChange }: VideoPlayerProps) {
     getCenterline,
     getYoloKeypoints,
     getQcaMetrics,
-    getVideoLayer,
     updateAnnotationLayer,
   ]);
 
