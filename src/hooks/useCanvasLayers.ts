@@ -61,15 +61,15 @@ export function useCanvasLayers(options: UseCanvasLayersOptions) {
   }, []);
 
   /**
-   * Handle canvas resize
+   * Handle canvas resize - runs on init and whenever dimensions change
    */
   useEffect(() => {
-    if (layerManagerRef.current) {
+    if (layerManagerRef.current && options.width > 0 && options.height > 0) {
       layerManagerRef.current.resize(options.width, options.height);
       // Render after resize to ensure layers are properly drawn
       layerManagerRef.current.render();
     }
-  }, [options.width, options.height]);
+  }, [isInitialized, options.width, options.height]);
 
   /**
    * Handle quality level - use LOW for consistent appearance
