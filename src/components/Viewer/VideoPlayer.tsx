@@ -108,9 +108,10 @@ export function VideoPlayer({ onFrameChange }: VideoPlayerProps) {
     const updateDimensions = () => {
       if (containerRef.current) {
         const rect = containerRef.current.getBoundingClientRect();
+        // Round to integers for canvas dimensions
         setDimensions({
-          width: rect.width,
-          height: rect.height,
+          width: Math.floor(rect.width),
+          height: Math.floor(rect.height),
         });
       }
     };
@@ -365,6 +366,32 @@ export function VideoPlayer({ onFrameChange }: VideoPlayerProps) {
     [getVideoLayer, getSeedPoints, currentFrame]
   );
 
+  // Helper: Check if click is inside ROI
+  const isClickInsideROI = useCallback(
+    (canvasX: number, canvasY: number): boolean => {
+      const videoLayer = getVideoLayer();
+      if (!videoLayer) return false;
+
+      const roi = getROI(currentFrame);
+      if (!roi) return false;
+
+      // Convert ROI corners to canvas coordinates
+      const topLeft = videoLayer.imageToCanvas(roi.x, roi.y);
+      const bottomRight = videoLayer.imageToCanvas(roi.x + roi.width, roi.y + roi.height);
+
+      return (
+        canvasX >= topLeft.x &&
+        canvasX <= bottomRight.x &&
+        canvasY >= topLeft.y &&
+        canvasY <= bottomRight.y
+      );
+    },
+    [getVideoLayer, getROI, currentFrame]
+  );
+
+  // Fixed ROI size constant
+  const FIXED_ROI_SIZE = 150;
+
   // Handle wheel zoom
   const handleWheel = useCallback(
     (e: WheelEvent) => {
@@ -434,19 +461,66 @@ export function VideoPlayer({ onFrameChange }: VideoPlayerProps) {
         return;
       }
 
-      // Priority 3: Seed mode - add new seed point
+      // Priority 3: Fixed-ROI mode - drag existing or create new centered ROI
+      if (annotationMode === 'fixed-roi' && videoLayer) {
+        const existingROI = getROI(currentFrame);
+
+        // Check if clicking inside existing ROI to drag it
+        if (existingROI && isClickInsideROI(canvasX, canvasY)) {
+          const roiCenter = videoLayer.imageToCanvas(
+            existingROI.x + existingROI.width / 2,
+            existingROI.y + existingROI.height / 2
+          );
+          setInteraction({
+            type: 'drag-roi',
+            offset: { x: canvasX - roiCenter.x, y: canvasY - roiCenter.y },
+          });
+          setCursorStyle('grabbing');
+          return;
+        }
+
+        // Create new 150x150 ROI centered at click position
+        const imagePoint = videoLayer.canvasToImage(canvasX, canvasY);
+        const halfSize = FIXED_ROI_SIZE / 2;
+        setROI(currentFrame, {
+          x: imagePoint.x - halfSize,
+          y: imagePoint.y - halfSize,
+          width: FIXED_ROI_SIZE,
+          height: FIXED_ROI_SIZE,
+        });
+        return;
+      }
+
+      // Priority 4: Seed mode - add new seed point
       if (annotationMode === 'seed' && videoLayer) {
         const imagePoint = videoLayer.canvasToImage(canvasX, canvasY);
         addSeedPoint(currentFrame, imagePoint);
         return;
       }
 
-      // Priority 4: ROI mode - start drawing
+      // Priority 5: ROI mode - start drawing (variable size)
       if (annotationMode === 'roi' && videoLayer) {
         const imagePoint = videoLayer.canvasToImage(canvasX, canvasY);
         setROI(currentFrame, { x: imagePoint.x, y: imagePoint.y, width: 0, height: 0 });
         setInteraction({ type: 'draw-roi' });
         return;
+      }
+
+      // Priority 6: Click inside ROI in any mode to drag
+      if (isClickInsideROI(canvasX, canvasY) && videoLayer) {
+        const roi = getROI(currentFrame);
+        if (roi) {
+          const roiCenter = videoLayer.imageToCanvas(
+            roi.x + roi.width / 2,
+            roi.y + roi.height / 2
+          );
+          setInteraction({
+            type: 'drag-roi',
+            offset: { x: canvasX - roiCenter.x, y: canvasY - roiCenter.y },
+          });
+          setCursorStyle('grabbing');
+          return;
+        }
       }
     },
     [
@@ -455,13 +529,16 @@ export function VideoPlayer({ onFrameChange }: VideoPlayerProps) {
       isClickInEKGTimeline,
       getFrameFromEKGClick,
       findSeedPointAtPosition,
+      isClickInsideROI,
       annotationMode,
       currentFrame,
       getSeedPoints,
+      getROI,
       addSeedPoint,
       setROI,
       pause,
       setCurrentFrame,
+      FIXED_ROI_SIZE,
     ]
   );
 
@@ -514,6 +591,28 @@ export function VideoPlayer({ onFrameChange }: VideoPlayerProps) {
         return;
       }
 
+      // Drag ROI by center
+      if (interaction.type === 'drag-roi' && videoLayer) {
+        const roi = getROI(currentFrame);
+        if (roi) {
+          // Calculate new center position
+          const newCenterCanvas = {
+            x: canvasX - interaction.offset.x,
+            y: canvasY - interaction.offset.y,
+          };
+          const newCenter = videoLayer.canvasToImage(newCenterCanvas.x, newCenterCanvas.y);
+
+          // Update ROI position (keep size)
+          setROI(currentFrame, {
+            x: newCenter.x - roi.width / 2,
+            y: newCenter.y - roi.height / 2,
+            width: roi.width,
+            height: roi.height,
+          });
+        }
+        return;
+      }
+
       // Update cursor based on hover
       let newCursor = 'default';
 
@@ -525,7 +624,11 @@ export function VideoPlayer({ onFrameChange }: VideoPlayerProps) {
         newCursor = 'crosshair';
       } else if (annotationMode === 'roi') {
         newCursor = 'crosshair';
+      } else if (annotationMode === 'fixed-roi') {
+        newCursor = isClickInsideROI(canvasX, canvasY) ? 'grab' : 'crosshair';
       } else if (findSeedPointAtPosition(canvasX, canvasY) !== null) {
+        newCursor = 'grab';
+      } else if (isClickInsideROI(canvasX, canvasY)) {
         newCursor = 'grab';
       }
 
@@ -539,6 +642,7 @@ export function VideoPlayer({ onFrameChange }: VideoPlayerProps) {
       isClickInEKGTimeline,
       getFrameFromEKGClick,
       findSeedPointAtPosition,
+      isClickInsideROI,
       annotationMode,
       currentFrame,
       updateSeedPoint,

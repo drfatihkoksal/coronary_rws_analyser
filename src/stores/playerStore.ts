@@ -9,7 +9,7 @@ import { create } from 'zustand';
 import { subscribeWithSelector } from 'zustand/middleware';
 import type { PlaybackState, ViewTransform } from '../types';
 
-export type AnnotationMode = 'none' | 'select' | 'roi' | 'seed' | 'pan';
+export type AnnotationMode = 'none' | 'select' | 'roi' | 'fixed-roi' | 'seed' | 'pan';
 
 interface PlayerState {
   // Playback

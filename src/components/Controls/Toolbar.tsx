@@ -20,6 +20,7 @@ export function Toolbar({ onFileOpen }: ToolbarProps) {
   const tools: { id: AnnotationMode; icon: string; label: string; shortcut: string }[] = [
     { id: 'select', icon: '👆', label: 'Select', shortcut: 'V' },
     { id: 'roi', icon: '⬜', label: 'Draw ROI', shortcut: 'B' },
+    { id: 'fixed-roi', icon: '🎯', label: 'Fixed ROI (150×150)', shortcut: 'F' },
     { id: 'seed', icon: '📍', label: 'Place Seed', shortcut: 'S' },
     { id: 'pan', icon: '✋', label: 'Pan', shortcut: 'H' },
   ];
