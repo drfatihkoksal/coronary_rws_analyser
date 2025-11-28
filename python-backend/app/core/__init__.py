@@ -6,6 +6,8 @@ Contains the main processing engines for coronary artery analysis:
 - DicomHandler: DICOM file loading and frame extraction
 - ECGParser: ECG waveform extraction and R-peak detection
 - NNUNetInference: Custom nnU-Net segmentation model
+- AngioPySegmentation: Seed-guided U-Net segmentation
+- YOLOKeypointEngine: Vessel keypoint detection for auto seed points
 - CenterlineExtractor: Skeleton-based centerline extraction
 - TrackingEngine: Hybrid CSRT + Template + Optical Flow
 - QCAEngine: Quantitative Coronary Analysis (diameter profiling)
@@ -30,6 +32,31 @@ except ImportError:
     get_inference = None
     SegmentationResult = None
 
+# Optional: AngioPy (requires torch and segmentation-models-pytorch)
+try:
+    from app.core.angiopy_segmentation import (
+        get_angiopy, AngioPySegmentation, AngioPyResult,
+        segment_with_yolo, AutoSegmentationResult
+    )
+    ANGIOPY_AVAILABLE = True
+except ImportError:
+    ANGIOPY_AVAILABLE = False
+    AngioPySegmentation = None
+    get_angiopy = None
+    AngioPyResult = None
+    segment_with_yolo = None
+    AutoSegmentationResult = None
+
+# Optional: YOLO Keypoint (requires ultralytics)
+try:
+    from app.core.yolo_keypoint import get_yolo_keypoint, YOLOKeypointEngine, KeypointResult
+    YOLO_KEYPOINT_AVAILABLE = True
+except ImportError:
+    YOLO_KEYPOINT_AVAILABLE = False
+    YOLOKeypointEngine = None
+    get_yolo_keypoint = None
+    KeypointResult = None
+
 __all__ = [
     # DICOM
     "DicomHandler",
@@ -40,11 +67,25 @@ __all__ = [
     "ECGParser",
     "get_parser",
 
-    # Segmentation
+    # Segmentation - nnU-Net
     "NNUNetInference",
     "SegmentationResult",
     "get_inference",
     "NNUNET_AVAILABLE",
+
+    # Segmentation - AngioPy
+    "AngioPySegmentation",
+    "AngioPyResult",
+    "get_angiopy",
+    "segment_with_yolo",
+    "AutoSegmentationResult",
+    "ANGIOPY_AVAILABLE",
+
+    # YOLO Keypoint
+    "YOLOKeypointEngine",
+    "KeypointResult",
+    "get_yolo_keypoint",
+    "YOLO_KEYPOINT_AVAILABLE",
 
     # Centerline
     "CenterlineExtractor",

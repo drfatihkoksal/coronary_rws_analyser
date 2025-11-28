@@ -20,13 +20,16 @@ Requirements:
 """
 
 import os
-import logging
 from pathlib import Path
 from typing import List, Tuple, Optional
 from dataclasses import dataclass
 import numpy as np
 
-logger = logging.getLogger(__name__)
+try:
+    from loguru import logger
+except ImportError:
+    import logging
+    logger = logging.getLogger(__name__)
 
 # Lazy imports for optional dependencies
 TORCH_AVAILABLE = False
@@ -402,3 +405,171 @@ def get_angiopy(model_path: Optional[str] = None) -> AngioPySegmentation:
         _angiopy_instance = AngioPySegmentation(model_path=model_path)
 
     return _angiopy_instance
+
+
+# =============================================================================
+# YOLO + AngioPy Pipeline
+# =============================================================================
+
+@dataclass
+class AutoSegmentationResult:
+    """Result of YOLO + AngioPy automatic segmentation."""
+    mask: np.ndarray  # Binary mask in full image coordinates
+    seed_points: List[Tuple[float, float]]  # Detected seed points (image coords)
+    centerline: List[Tuple[float, float]]  # MCP centerline (image coords, x,y format)
+    yolo_confidence: float  # YOLO detection confidence
+    roi: Tuple[int, int, int, int]  # ROI used (x, y, w, h)
+    success: bool
+    error_message: Optional[str] = None
+
+
+def segment_with_yolo(
+    image: np.ndarray,
+    roi: Tuple[int, int, int, int],
+    angiopy_model: Optional[AngioPySegmentation] = None,
+    yolo_model: Optional['YOLOKeypointEngine'] = None,
+    return_probability: bool = False,
+    extract_centerline: bool = True
+) -> AutoSegmentationResult:
+    """
+    Automatic vessel segmentation using YOLO keypoint detection + AngioPy.
+
+    Pipeline:
+    1. Crop ROI (150x150) from image
+    2. Run YOLO keypoint detection → 5 seed points
+    3. Run AngioPy segmentation with detected seed points
+    4. Extract centerline using MCP (start→end keypoints)
+    5. Return mask and centerline in full image coordinates
+
+    Args:
+        image: Full frame image (grayscale or BGR)
+        roi: ROI as (x, y, w, h) - should be 150x150
+        angiopy_model: AngioPy instance (uses singleton if None)
+        yolo_model: YOLO instance (uses singleton if None)
+        return_probability: Also return probability map
+        extract_centerline: Extract centerline using MCP algorithm
+
+    Returns:
+        AutoSegmentationResult with mask, seed points, and centerline
+    """
+    from .yolo_keypoint import get_yolo_keypoint, YOLOKeypointEngine
+    from .centerline_extractor import get_extractor
+
+    # Get model instances
+    if angiopy_model is None:
+        angiopy_model = get_angiopy()
+
+    if yolo_model is None:
+        yolo_model = get_yolo_keypoint()
+
+    x, y, w, h = roi
+
+    # Validate ROI
+    frame_h, frame_w = image.shape[:2]
+    if x < 0 or y < 0 or x + w > frame_w or y + h > frame_h:
+        return AutoSegmentationResult(
+            mask=np.zeros((frame_h, frame_w), dtype=np.uint8),
+            seed_points=[],
+            centerline=[],
+            yolo_confidence=0.0,
+            roi=roi,
+            success=False,
+            error_message=f"ROI out of bounds: {roi}, frame: {frame_w}x{frame_h}"
+        )
+
+    # Crop ROI
+    roi_crop = image[y:y+h, x:x+w]
+    logger.info(f"[YOLO+AngioPy] ROI crop size: {roi_crop.shape[1]}x{roi_crop.shape[0]} (expected 150x150)")
+
+    # Step 1: YOLO keypoint detection
+    yolo_result = yolo_model.detect(roi_crop)
+    logger.info(f"[YOLO+AngioPy] YOLO result: success={yolo_result.success}, keypoints={len(yolo_result.keypoints)}")
+
+    if not yolo_result.success:
+        return AutoSegmentationResult(
+            mask=np.zeros((frame_h, frame_w), dtype=np.uint8),
+            seed_points=[],
+            centerline=[],
+            yolo_confidence=0.0,
+            roi=roi,
+            success=False,
+            error_message=f"YOLO detection failed: {yolo_result.error_message}"
+        )
+
+    # Convert keypoints to image coordinates
+    seed_points_image = yolo_result.to_image_coords(x, y)
+    logger.info(f"[YOLO+AngioPy] Keypoints in ROI coords: {[(f'{kp[0]:.1f}', f'{kp[1]:.1f}') for kp in yolo_result.keypoints]}")
+    logger.info(f"[YOLO+AngioPy] Keypoints in image coords: {[(f'{kp[0]:.1f}', f'{kp[1]:.1f}') for kp in seed_points_image]}")
+
+    # Step 2: AngioPy segmentation
+    try:
+        angiopy_result = angiopy_model.segment(
+            image=image,
+            seed_points=seed_points_image,
+            return_probability=return_probability
+        )
+
+        # Log mask stats
+        mask_area = angiopy_result.mask.sum()
+        logger.info(f"[YOLO+AngioPy] Mask area: {mask_area} pixels")
+
+        # Step 3: Extract centerline using MCP (start → end)
+        centerline_points = []
+        if extract_centerline and len(seed_points_image) >= 2:
+            try:
+                extractor = get_extractor()
+
+                # Use YOLO start and end points for MCP
+                start_point = seed_points_image[0]   # First keypoint
+                end_point = seed_points_image[-1]    # Last keypoint
+
+                # MCP requires at least 2 seed points
+                mcp_seeds = [start_point, end_point]
+
+                # Extract centerline using minimum cost path
+                centerline_yx = extractor.extract(
+                    mask=angiopy_result.mask,
+                    method="mcp",
+                    seed_points=mcp_seeds
+                )
+
+                # Convert (y, x) to (x, y) for frontend
+                if len(centerline_yx) > 0:
+                    # Smooth with B-spline for better quality
+                    smoothed = extractor.smooth_bspline(centerline_yx, smoothing=0.5)
+                    centerline_points = [(float(pt[1]), float(pt[0])) for pt in smoothed]
+
+                logger.debug(f"MCP centerline extracted: {len(centerline_points)} points")
+
+            except Exception as e:
+                logger.warning(f"MCP centerline extraction failed: {e}, falling back to skeleton")
+                # Fallback to skeleton method
+                try:
+                    extractor = get_extractor()
+                    centerline_yx = extractor.extract(angiopy_result.mask, method="skeleton")
+                    if len(centerline_yx) > 0:
+                        smoothed = extractor.smooth_bspline(centerline_yx, smoothing=0.5)
+                        centerline_points = [(float(pt[1]), float(pt[0])) for pt in smoothed]
+                except Exception as e2:
+                    logger.error(f"Skeleton fallback also failed: {e2}")
+
+        return AutoSegmentationResult(
+            mask=angiopy_result.mask,
+            seed_points=seed_points_image,  # YOLO keypoints as-is
+            centerline=centerline_points,
+            yolo_confidence=yolo_result.confidence,
+            roi=roi,
+            success=True
+        )
+
+    except Exception as e:
+        logger.error(f"AngioPy segmentation failed: {e}")
+        return AutoSegmentationResult(
+            mask=np.zeros((frame_h, frame_w), dtype=np.uint8),
+            seed_points=seed_points_image,  # Original on error
+            centerline=[],
+            yolo_confidence=yolo_result.confidence,
+            roi=roi,
+            success=False,
+            error_message=f"AngioPy failed: {str(e)}"
+        )

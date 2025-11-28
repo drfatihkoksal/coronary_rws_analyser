@@ -31,10 +31,18 @@ from app.core.nnunet_inference import get_inference, NNUNET_AVAILABLE
 # Check AngioPy availability
 ANGIOPY_AVAILABLE = False
 try:
-    from app.core.angiopy_segmentation import get_angiopy, SMP_AVAILABLE
+    from app.core.angiopy_segmentation import get_angiopy, SMP_AVAILABLE, segment_with_yolo
     ANGIOPY_AVAILABLE = SMP_AVAILABLE
 except ImportError:
-    pass
+    segment_with_yolo = None
+
+# Check YOLO Keypoint availability
+YOLO_KEYPOINT_AVAILABLE = False
+try:
+    from app.core.yolo_keypoint import get_yolo_keypoint
+    YOLO_KEYPOINT_AVAILABLE = True
+except ImportError:
+    get_yolo_keypoint = None
 
 router = APIRouter()
 
@@ -42,7 +50,7 @@ router = APIRouter()
 DEFAULT_ENGINE = os.environ.get("SEGMENTATION_ENGINE", "nnunet")
 
 # Log availability at module load
-logger.info(f"Segmentation engines - nnU-Net: {NNUNET_AVAILABLE}, AngioPy: {ANGIOPY_AVAILABLE}, Default: {DEFAULT_ENGINE}")
+logger.info(f"Segmentation engines - nnU-Net: {NNUNET_AVAILABLE}, AngioPy: {ANGIOPY_AVAILABLE}, YOLO: {YOLO_KEYPOINT_AVAILABLE}, Default: {DEFAULT_ENGINE}")
 
 
 def encode_mask(mask: np.ndarray) -> str:
@@ -464,6 +472,14 @@ async def get_available_engines():
             "requires": "seed_points (2-10, ordered proximal→distal)",
             "seed_points": True,
             "reference": "Petersen et al., Int J Cardiol 2024"
+        },
+        "yolo+angiopy": {
+            "available": YOLO_KEYPOINT_AVAILABLE and ANGIOPY_AVAILABLE,
+            "name": "YOLO + AngioPy (Auto)",
+            "description": "Automatic: YOLO detects 5 keypoints → AngioPy segments",
+            "requires": "roi (150x150)",
+            "seed_points": "auto-detected",
+            "endpoint": "/segmentation/segment-auto"
         }
     }
 
@@ -486,6 +502,18 @@ async def get_available_engines():
                 "encoder": "inceptionresnetv2",
                 "input_size": 512,
                 "is_loaded": angiopy.is_loaded
+            }
+        except Exception:
+            pass
+
+    if YOLO_KEYPOINT_AVAILABLE:
+        try:
+            yolo = get_yolo_keypoint()
+            engines["yolo+angiopy"]["model_info"] = {
+                "yolo_model": "YOLOv8-pose",
+                "input_size": 150,
+                "num_keypoints": 5,
+                "is_loaded": yolo.is_loaded
             }
         except Exception:
             pass
@@ -556,5 +584,281 @@ async def health():
     return HealthResponse(
         status=status,
         service="segmentation",
-        version="1.1.0"  # Bumped for AngioPy support
+        version="1.2.0"  # Bumped for YOLO keypoint support
     )
+
+
+# =============================================================================
+# YOLO Keypoint Detection Endpoints
+# =============================================================================
+
+@router.post("/detect-keypoints")
+async def detect_keypoints(
+    frame_index: int,
+    roi_x: int,
+    roi_y: int,
+    roi_w: int = 150,
+    roi_h: int = 150
+):
+    """
+    Detect vessel keypoints using YOLO within ROI.
+
+    Detects 5 keypoints along the vessel centerline:
+    start → quarter → center → three_quarter → end
+
+    These keypoints can be used as seed points for AngioPy segmentation.
+
+    Args:
+        frame_index: Frame index in DICOM
+        roi_x: ROI top-left x coordinate
+        roi_y: ROI top-left y coordinate
+        roi_w: ROI width (default 150)
+        roi_h: ROI height (default 150)
+
+    Returns:
+        Detected keypoints in IMAGE coordinates (not ROI)
+    """
+    if not YOLO_KEYPOINT_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="YOLO keypoint detection not available. Install ultralytics."
+        )
+
+    handler = get_handler()
+    if not handler.is_loaded:
+        raise HTTPException(status_code=404, detail="No DICOM file loaded")
+
+    frame = handler.get_frame(frame_index, normalize=True, target_dtype=np.uint8)
+    if frame is None:
+        raise HTTPException(status_code=400, detail="Failed to get frame")
+
+    roi = (roi_x, roi_y, roi_w, roi_h)
+
+    # Validate ROI bounds
+    frame_h, frame_w = frame.shape[:2]
+    if roi_x < 0 or roi_y < 0 or roi_x + roi_w > frame_w or roi_y + roi_h > frame_h:
+        raise HTTPException(
+            status_code=400,
+            detail=f"ROI out of bounds: {roi}, frame: {frame_w}x{frame_h}"
+        )
+
+    try:
+        yolo = get_yolo_keypoint()
+        result = yolo.detect_with_roi(frame, roi)
+
+        if not result.success:
+            return {
+                "frame_index": frame_index,
+                "roi": list(roi),
+                "success": False,
+                "error": result.error_message,
+                "keypoints": []
+            }
+
+        # Convert keypoints to {x, y} format
+        keypoints_xy = [{"x": float(x), "y": float(y)} for x, y in result.keypoints]
+
+        return {
+            "frame_index": frame_index,
+            "roi": list(roi),
+            "success": True,
+            "confidence": result.confidence,
+            "keypoints": keypoints_xy,
+            "num_keypoints": len(keypoints_xy),
+            "keypoint_names": ["start", "quarter", "center", "three_quarter", "end"]
+        }
+
+    except Exception as e:
+        logger.error(f"YOLO keypoint detection failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/segment-auto")
+async def segment_auto(
+    frame_index: int,
+    roi_x: int,
+    roi_y: int,
+    roi_w: int = 150,
+    roi_h: int = 150,
+    return_probability: bool = False
+):
+    """
+    Automatic vessel segmentation using YOLO keypoint detection + AngioPy.
+
+    Pipeline:
+    1. Crop ROI (150x150) from frame
+    2. Run YOLO keypoint detection → 5 seed points
+    3. Run AngioPy segmentation with detected seed points
+    4. Return mask in full image coordinates
+
+    This is the recommended endpoint for automatic segmentation during tracking.
+
+    Args:
+        frame_index: Frame index in DICOM
+        roi_x: ROI top-left x coordinate
+        roi_y: ROI top-left y coordinate
+        roi_w: ROI width (default 150)
+        roi_h: ROI height (default 150)
+        return_probability: Also return probability map
+
+    Returns:
+        Segmentation mask, detected seed points, and confidence
+    """
+    if not YOLO_KEYPOINT_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="YOLO keypoint detection not available. Install ultralytics."
+        )
+
+    if not ANGIOPY_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="AngioPy not available. Install segmentation-models-pytorch."
+        )
+
+    handler = get_handler()
+    if not handler.is_loaded:
+        raise HTTPException(status_code=404, detail="No DICOM file loaded")
+
+    frame = handler.get_frame(frame_index, normalize=True, target_dtype=np.uint8)
+    if frame is None:
+        raise HTTPException(status_code=400, detail="Failed to get frame")
+
+    roi = (roi_x, roi_y, roi_w, roi_h)
+
+    # Validate ROI bounds
+    frame_h, frame_w = frame.shape[:2]
+    if roi_x < 0 or roi_y < 0 or roi_x + roi_w > frame_w or roi_y + roi_h > frame_h:
+        raise HTTPException(
+            status_code=400,
+            detail=f"ROI out of bounds: {roi}, frame: {frame_w}x{frame_h}"
+        )
+
+    logger.info(f"Auto segmentation: frame={frame_index}, ROI={roi}")
+
+    try:
+        result = segment_with_yolo(
+            image=frame,
+            roi=roi,
+            return_probability=return_probability
+        )
+
+        if not result.success:
+            return {
+                "frame_index": frame_index,
+                "roi": list(roi),
+                "success": False,
+                "error": result.error_message,
+                "mask": encode_mask(np.zeros((frame_h, frame_w), dtype=np.uint8)),
+                "seed_points": [],
+                "centerline": []
+            }
+
+        # Encode mask
+        mask_base64 = encode_mask(result.mask)
+
+        # Convert seed points to {x, y} format
+        seed_points_xy = [{"x": float(x), "y": float(y)} for x, y in result.seed_points]
+
+        # Convert centerline to {x, y} format
+        centerline_xy = [{"x": float(x), "y": float(y)} for x, y in result.centerline]
+
+        response = {
+            "frame_index": frame_index,
+            "roi": list(roi),
+            "success": True,
+            "mask": mask_base64,
+            "width": result.mask.shape[1],
+            "height": result.mask.shape[0],
+            "seed_points": seed_points_xy,
+            "centerline": centerline_xy,
+            "yolo_confidence": result.yolo_confidence,
+            "engine_used": "yolo+angiopy"
+        }
+
+        return response
+
+    except Exception as e:
+        logger.error(f"Auto segmentation failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/segment-auto-with-centerline")
+async def segment_auto_with_centerline(
+    frame_index: int,
+    roi_x: int,
+    roi_y: int,
+    roi_w: int = 150,
+    roi_h: int = 150
+):
+    """
+    Complete automatic analysis: YOLO → AngioPy → MCP Centerline.
+
+    Pipeline:
+    1. YOLO keypoint detection (5 keypoints: start, quarter, center, 3/4, end)
+    2. AngioPy segmentation with detected keypoints
+    3. MCP Centerline extraction (Dijkstra from start to end keypoint)
+
+    The centerline is extracted using Minimum Cost Path algorithm between
+    YOLO's start and end keypoints, ensuring the path follows the vessel center.
+
+    Args:
+        frame_index: Frame index
+        roi_x, roi_y, roi_w, roi_h: ROI parameters (150x150 recommended)
+
+    Returns:
+        mask, seed_points (YOLO keypoints), centerline (MCP path)
+    """
+    if not YOLO_KEYPOINT_AVAILABLE or not ANGIOPY_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="YOLO and AngioPy required for auto segmentation"
+        )
+
+    handler = get_handler()
+    if not handler.is_loaded:
+        raise HTTPException(status_code=404, detail="No DICOM file loaded")
+
+    frame = handler.get_frame(frame_index, normalize=True, target_dtype=np.uint8)
+    if frame is None:
+        raise HTTPException(status_code=400, detail="Failed to get frame")
+
+    roi = (roi_x, roi_y, roi_w, roi_h)
+
+    try:
+        # YOLO + AngioPy + MCP Centerline (all in one call)
+        seg_result = segment_with_yolo(
+            image=frame,
+            roi=roi,
+            extract_centerline=True  # Uses MCP from start to end keypoint
+        )
+
+        if not seg_result.success:
+            return {
+                "frame_index": frame_index,
+                "roi": list(roi),
+                "success": False,
+                "error": seg_result.error_message,
+                "seed_points": [],
+                "centerline": []
+            }
+
+        # Convert seed points and centerline to {x, y} format
+        seed_points_xy = [{"x": float(x), "y": float(y)} for x, y in seg_result.seed_points]
+        centerline_xy = [{"x": float(x), "y": float(y)} for x, y in seg_result.centerline]
+
+        return {
+            "frame_index": frame_index,
+            "roi": list(roi),
+            "success": True,
+            "mask": encode_mask(seg_result.mask),
+            "seed_points": seed_points_xy,
+            "centerline": centerline_xy,
+            "centerline_method": "mcp",  # Minimum Cost Path
+            "yolo_confidence": seg_result.yolo_confidence,
+            "engine_used": "yolo+angiopy"
+        }
+
+    except Exception as e:
+        logger.error(f"Auto segmentation with centerline failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

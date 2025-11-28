@@ -107,5 +107,16 @@ export {
   selectExportHistory,
 } from './exportStore';
 
+// Overlay Visibility
+export {
+  useOverlayStore,
+  selectOverlayVisibility,
+  selectMaskVisible,
+  selectCenterlineVisible,
+  selectSeedPointsVisible,
+  selectYoloKeypointsVisible,
+  selectRoiVisible,
+} from './overlayStore';
+
 // Type re-exports
 export type { PlaybackState, ViewTransform } from '../types';

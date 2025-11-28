@@ -78,15 +78,16 @@ export interface BoundingBox {
 // Segmentation Types
 // ============================================================================
 
-export type SegmentationEngine = 'nnunet' | 'angiopy';
+export type SegmentationEngine = 'nnunet' | 'angiopy' | 'yolo+angiopy';
 
 export interface SegmentationEngineInfo {
   available: boolean;
   name: string;
   description: string;
   requires: string;
-  seedPoints: boolean;
+  seedPoints: boolean | string;  // boolean or 'auto-detected'
   reference?: string;
+  endpoint?: string;  // For yolo+angiopy
 }
 
 export interface SegmentationResult {

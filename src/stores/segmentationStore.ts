@@ -16,6 +16,8 @@ interface FrameSegmentationData {
   probabilityMap: string | null; // Base64 encoded
   centerline: Point[];
   seedPoints: Point[];          // Generated seed points from centerline
+  yoloKeypoints: Point[];       // YOLO detected keypoints (for yolo+angiopy)
+  yoloConfidence: number;       // YOLO detection confidence
 }
 
 interface SegmentationState {
@@ -51,11 +53,17 @@ interface SegmentationState {
   extractCenterline: (frameIndex: number, method?: 'skeleton' | 'distance' | 'mcp') => Promise<Point[]>;
   segmentAndExtract: (frameIndex: number, roi?: BoundingBox) => Promise<void>;
 
+  // YOLO actions
+  detectKeypoints: (frameIndex: number, roi: BoundingBox) => Promise<Point[]>;
+  segmentAutoWithYolo: (frameIndex: number, roi: BoundingBox) => Promise<void>;
+
   // Getters - return cached data for specific frame
   getFrameData: (frameIndex: number) => FrameSegmentationData | undefined;
   getMask: (frameIndex: number) => string | null;
   getCenterline: (frameIndex: number) => Point[];
   getSeedPoints: (frameIndex: number) => Point[];
+  getYoloKeypoints: (frameIndex: number) => Point[];
+  getYoloConfidence: (frameIndex: number) => number;
   hasData: (frameIndex: number) => boolean;
 
   // Get all frames with data
@@ -72,6 +80,8 @@ const EMPTY_FRAME_DATA: FrameSegmentationData = {
   probabilityMap: null,
   centerline: [],
   seedPoints: [],
+  yoloKeypoints: [],
+  yoloConfidence: 0,
 };
 
 export const useSegmentationStore = create<SegmentationState>()(
@@ -227,7 +237,41 @@ export const useSegmentationStore = create<SegmentationState>()(
       set({ isSegmenting: true, error: null });
 
       try {
-        if (selectedEngine === 'angiopy') {
+        if (selectedEngine === 'yolo+angiopy') {
+          // YOLO + AngioPy: automatic seed point detection + MCP centerline
+          if (!roi) {
+            throw new Error('YOLO+AngioPy requires ROI (150x150)');
+          }
+
+          // Use segmentAuto which now includes MCP centerline
+          const result = await segmentationApi.segmentAuto(frameIndex, roi);
+
+          if (!result.success) {
+            throw new Error(result.error || 'YOLO+AngioPy segmentation failed');
+          }
+
+          console.log('[segmentationStore] YOLO+AngioPy frame', frameIndex, {
+            mask: result.mask ? `${result.mask.length} chars` : 'null',
+            centerline: result.centerline?.length ?? 0,
+            seedPoints: result.seedPoints?.length ?? 0,
+            yoloConfidence: result.yoloConfidence,
+          });
+
+          // Cache all results - centerline from MCP (start→end)
+          set((state) => {
+            const newFrameData = new Map(state.frameData);
+            newFrameData.set(frameIndex, {
+              mask: result.mask,
+              probabilityMap: null,
+              centerline: result.centerline || [],  // MCP centerline
+              seedPoints: [],
+              yoloKeypoints: result.seedPoints || [],  // YOLO detected keypoints
+              yoloConfidence: result.yoloConfidence || 0,
+            });
+            return { isSegmenting: false, frameData: newFrameData };
+          });
+
+        } else if (selectedEngine === 'angiopy') {
           if (seedPoints.length < 2) {
             throw new Error('AngioPy requires at least 2 seed points');
           }
@@ -254,6 +298,8 @@ export const useSegmentationStore = create<SegmentationState>()(
               probabilityMap: segResult.probabilityMap,
               centerline: centerlineResult.centerline,
               seedPoints: centerlineResult.seedPoints,
+              yoloKeypoints: [],
+              yoloConfidence: 0,
             });
             return { isSegmenting: false, frameData: newFrameData };
           });
@@ -276,6 +322,8 @@ export const useSegmentationStore = create<SegmentationState>()(
               probabilityMap: result.probabilityMap,
               centerline: result.centerline,
               seedPoints: result.seedPoints,
+              yoloKeypoints: [],
+              yoloConfidence: 0,
             });
             return { isSegmenting: false, frameData: newFrameData };
           });
@@ -283,6 +331,54 @@ export const useSegmentationStore = create<SegmentationState>()(
 
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Segmentation failed';
+        set({ isSegmenting: false, error: message });
+      }
+    },
+
+    // YOLO keypoint detection only
+    detectKeypoints: async (frameIndex, roi) => {
+      try {
+        const result = await segmentationApi.detectKeypoints(frameIndex, roi);
+
+        if (!result.success) {
+          console.warn('YOLO detection failed:', result.error);
+          return [];
+        }
+
+        return result.keypoints;
+      } catch (error) {
+        console.error('YOLO keypoint detection failed:', error);
+        return [];
+      }
+    },
+
+    // YOLO + AngioPy automatic segmentation with MCP centerline
+    segmentAutoWithYolo: async (frameIndex, roi) => {
+      set({ isSegmenting: true, error: null });
+
+      try {
+        // segmentAuto now includes MCP centerline extraction
+        const result = await segmentationApi.segmentAuto(frameIndex, roi);
+
+        if (!result.success) {
+          throw new Error(result.error || 'Auto segmentation failed');
+        }
+
+        // Cache results - centerline from MCP (start→end)
+        set((state) => {
+          const newFrameData = new Map(state.frameData);
+          newFrameData.set(frameIndex, {
+            mask: result.mask,
+            probabilityMap: null,
+            centerline: result.centerline || [],  // MCP centerline
+            seedPoints: [],
+            yoloKeypoints: result.seedPoints || [],  // YOLO keypoints
+            yoloConfidence: result.yoloConfidence || 0,
+          });
+          return { isSegmenting: false, frameData: newFrameData };
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Auto segmentation failed';
         set({ isSegmenting: false, error: message });
       }
     },
@@ -303,6 +399,16 @@ export const useSegmentationStore = create<SegmentationState>()(
     getSeedPoints: (frameIndex) => {
       const data = get().frameData.get(frameIndex);
       return data?.seedPoints ?? [];
+    },
+
+    getYoloKeypoints: (frameIndex) => {
+      const data = get().frameData.get(frameIndex);
+      return data?.yoloKeypoints ?? [];
+    },
+
+    getYoloConfidence: (frameIndex) => {
+      const data = get().frameData.get(frameIndex);
+      return data?.yoloConfidence ?? 0;
     },
 
     hasData: (frameIndex) => {

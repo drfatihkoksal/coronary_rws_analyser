@@ -314,6 +314,39 @@ export function useCanvasLayers(options: UseCanvasLayersOptions) {
   }, []);
 
   /**
+   * Get annotation layer
+   */
+  const getAnnotationLayer = useCallback((): AnnotationLayer | null => {
+    if (!layerManagerRef.current) return null;
+    return layerManagerRef.current.getLayer<AnnotationLayer>(LayerType.ANNOTATION) || null;
+  }, []);
+
+  /**
+   * Set annotation visibility flags (for individual overlays within annotation layer)
+   */
+  const setAnnotationVisibility = useCallback(
+    (flags: {
+      roi?: boolean;
+      centerline?: boolean;
+      seedPoints?: boolean;
+      yoloKeypoints?: boolean;
+      diameterMarkers?: boolean;
+    }) => {
+      if (!layerManagerRef.current) return;
+
+      const annotationLayer = layerManagerRef.current.getLayer<AnnotationLayer>(
+        LayerType.ANNOTATION
+      );
+
+      if (annotationLayer) {
+        annotationLayer.setVisibility(flags);
+        render();
+      }
+    },
+    [render]
+  );
+
+  /**
    * Reset view (zoom/pan)
    */
   const resetView = useCallback(() => {
@@ -371,6 +404,10 @@ export function useCanvasLayers(options: UseCanvasLayersOptions) {
     getLayerManager,
     getVideoLayer,
     getOverlayLayer,
+    getAnnotationLayer,
+
+    // Annotation visibility
+    setAnnotationVisibility,
 
     // Utilities
     resetView,

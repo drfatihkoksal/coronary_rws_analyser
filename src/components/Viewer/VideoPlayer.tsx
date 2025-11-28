@@ -18,7 +18,9 @@ import { useEcgStore } from '../../stores/ecgStore';
 import { useSegmentationStore } from '../../stores/segmentationStore';
 import { useAnnotationStore } from '../../stores/annotationStore';
 import { useQcaStore } from '../../stores/qcaStore';
+import { useOverlayStore } from '../../stores/overlayStore';
 import { useCanvasLayers } from '../../hooks/useCanvasLayers';
+import { LayerType } from '../../lib/canvas';
 import type { EKGData } from '../../lib/canvas';
 
 // Interaction state machine
@@ -66,6 +68,7 @@ export function VideoPlayer({ onFrameChange }: VideoPlayerProps) {
   const frameData = useSegmentationStore((s) => s.frameData);
   const getMask = useSegmentationStore((s) => s.getMask);
   const getCenterline = useSegmentationStore((s) => s.getCenterline);
+  const getYoloKeypoints = useSegmentationStore((s) => s.getYoloKeypoints);
 
   // Annotation store
   // Subscribe to frameAnnotations Map to trigger re-render when annotations change
@@ -81,6 +84,9 @@ export function VideoPlayer({ onFrameChange }: VideoPlayerProps) {
   // QCA store
   const getQcaMetrics = useQcaStore((s) => s.getMetrics);
 
+  // Overlay visibility store
+  const overlayVisibility = useOverlayStore((s) => s.visibility);
+
   // Canvas layer system
   const {
     canvasRef,
@@ -93,6 +99,8 @@ export function VideoPlayer({ onFrameChange }: VideoPlayerProps) {
     getVideoLayer,
     getOverlayLayer,
     getLayerManager,
+    setAnnotationVisibility,
+    setLayerVisibility,
   } = useCanvasLayers({ width: dimensions.width, height: dimensions.height });
 
   // Update dimensions on resize
@@ -122,6 +130,24 @@ export function VideoPlayer({ onFrameChange }: VideoPlayerProps) {
 
     return () => clearInterval(interval);
   }, [playbackState, totalFrames, frameRate, playbackSpeed, nextFrame]);
+
+  // Sync overlay visibility to canvas layers
+  useEffect(() => {
+    if (!isInitialized) return;
+
+    // Update annotation layer visibility flags
+    setAnnotationVisibility({
+      roi: overlayVisibility.roi,
+      centerline: overlayVisibility.centerline,
+      seedPoints: overlayVisibility.seedPoints,
+      yoloKeypoints: overlayVisibility.yoloKeypoints,
+      diameterMarkers: overlayVisibility.diameterMarkers,
+    });
+
+    // Update segmentation layer visibility (mask)
+    setLayerVisibility(LayerType.SEGMENTATION, overlayVisibility.mask);
+
+  }, [overlayVisibility, isInitialized, setAnnotationVisibility, setLayerVisibility]);
 
   // Notify on frame change
   useEffect(() => {
@@ -247,6 +273,17 @@ export function VideoPlayer({ onFrameChange }: VideoPlayerProps) {
       centerlines = [{ points: centerlineCanvas, color: '#00FF00', width: 2 }];
     }
 
+    // Get YOLO keypoints for current frame
+    const yoloKeypointsImage = getYoloKeypoints(currentFrame);
+    const keypointNames = ['start', 'quarter', 'center', '3/4', 'end'];
+    let yoloKeypoints = undefined;
+    if (yoloKeypointsImage && yoloKeypointsImage.length > 0) {
+      yoloKeypoints = yoloKeypointsImage.map((p, i) => ({
+        point: videoLayer.imageToCanvas(p.x, p.y),
+        name: keypointNames[i] || `kp${i}`,
+      }));
+    }
+
     // Get QCA markers
     const qcaMetrics = getQcaMetrics(currentFrame);
     let diameterMarkers = undefined;
@@ -280,6 +317,7 @@ export function VideoPlayer({ onFrameChange }: VideoPlayerProps) {
 
     updateAnnotationLayer({
       seedPoints: seedPointsCanvas,
+      yoloKeypoints,
       roi: roiCanvas,
       centerlines,
       diameterMarkers,
@@ -292,6 +330,7 @@ export function VideoPlayer({ onFrameChange }: VideoPlayerProps) {
     getSeedPoints,
     getROI,
     getCenterline,
+    getYoloKeypoints,
     getQcaMetrics,
     getVideoLayer,
     updateAnnotationLayer,
