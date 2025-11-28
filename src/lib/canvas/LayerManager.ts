@@ -158,12 +158,9 @@ export class LayerManager implements LayerManagerInterface {
 
     // Render each layer
     sortedLayers.forEach((layer) => {
-      // Always render video, annotation, and overlay layers
-      // Overlay must render every frame for EKG marker position update
-      const shouldAlwaysRender =
-        layer.getType() === LayerType.VIDEO ||
-        layer.getType() === LayerType.ANNOTATION ||
-        layer.getType() === LayerType.OVERLAY;
+      // Always render all layers to ensure zoom/pan sync
+      // Each layer gets transform from VideoLayer for proper positioning
+      const shouldAlwaysRender = true;
 
       if (layer.isVisible() && (layer.isDirty() || shouldAlwaysRender)) {
         layer.render(options);
